@@ -85,7 +85,9 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
 @st.cache_data(ttl=3600, show_spinner="Procesando Métricas y Riesgo (Fase 2-4)...")
 @monitor_latency("process_metrics_and_risk")
 def process_metrics_and_risk(df_raw: pd.DataFrame):
-    """FASE 2, 3 y 4: Métricas Clave y Score de Riesgo usando DuckDB"""
+    """FASE 2, 3 y 4: Métricas Clave y Score de Riesgo usando DuckDB
+    OPTIMIZADO: Usa operaciones vectorizadas en lugar de apply() para mayor velocidad.
+    """
     if df_raw.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         
@@ -129,16 +131,19 @@ def process_metrics_and_risk(df_raw: pd.DataFrame):
         np.log1p(prov_df['valor_total'])
     ).round(2)
     
-    # Nivel de Riesgo (Fase 3)
-    def asignar_nivel(row):
-        if row['pct_directa'] >= 0.70 and row['entidades_distintas'] > 1 and row['contratos_totales'] >= 5:
-            return '🔴 ALTO'
-        elif row['pct_licitacion'] >= 0.50 and row['contratos_totales'] < 5:
-            return '🟢 BAJO'
-        else:
-            return '🟡 MEDIO'
-            
-    prov_df['nivel_riesgo'] = prov_df.apply(asignar_nivel, axis=1)
+    # Nivel de Riesgo (Fase 3) - OPTIMIZADO: Vectorizado en lugar de apply()
+    # ANTES: prov_df.apply(asignar_nivel, axis=1) - Lento (función Python por fila)
+    # DESPUÉS: Operaciones vectorizadas con NumPy - Rápido
+    cond_alto = (prov_df['pct_directa'] >= 0.70) & (prov_df['entidades_distintas'] > 1) & (prov_df['contratos_totales'] >= 5)
+    cond_bajo = (prov_df['pct_licitacion'] >= 0.50) & (prov_df['contratos_totales'] < 5)
+    
+    # Usar np.select para asignar niveles vectorialmente
+    prov_df['nivel_riesgo'] = np.select(
+        [cond_alto, cond_bajo],
+        ['🔴 ALTO', '🟢 BAJO'],
+        default='🟡 MEDIO'
+    )
+    
     prov_df.sort_values('score_riesgo', ascending=False, inplace=True)
     
     # Métricas Entidades (Fase 2)
@@ -271,9 +276,32 @@ def create_pyvis_html(G):
         
     net.force_atlas_2based(gravity=-60, central_gravity=0.01, spring_length=120, spring_strength=0.05, damping=0.5)
     
+    # OPTIMIZACIÓN: Limitar número de nodos para render rápido
+    # Si hay más de 100 nodos, solo mostrar los más relevantes
+    max_nodes = 100
+    nodes = list(G.nodes())
+    
+    if len(nodes) > max_nodes:
+        # Priorizar nodos por importancia (más contratos/valor)
+        # Crear lista de (node, score) para ordenar
+        node_scores = []
+        for node in nodes:
+            data = G.nodes[node]
+            score = data.get('size', 10)
+            node_scores.append((node, score))
+        
+        # Ordenar por score y tomar top N
+        node_scores.sort(key=lambda x: x[1], reverse=True)
+        nodes = [n[0] for n in node_scores[:max_nodes]]
+        
+        # Filtrar aristas para que solo conecten nodos visibles
+        edges_to_keep = [(u, v, d) for u, v, d in G.edges(data=True) 
+                        if u in nodes and v in nodes]
+    
     # Agregar nodos en batch (más eficiente)
     nodes_data = []
-    for n, d in G.nodes(data=True):
+    for n in nodes:
+        d = G.nodes[n]
         nodes_data.append({
             'id': n,
             'label': d.get('label', n[:20]),
@@ -288,8 +316,12 @@ def create_pyvis_html(G):
                     color=node['color'], shape=node['shape'], size=node['size'])
     
     # Agregar aristas en batch
+    if len(nodes) < max_nodes:
+        # Usar G.edges() normal si no hubo filtrado
+        edges_to_keep = G.edges(data=True)
+    
     edges_data = []
-    for u, v, d in G.edges(data=True):
+    for u, v, d in edges_to_keep:
         edges_data.append({
             'source': u,
             'target': v,
@@ -338,7 +370,13 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
         val = st.session_state.get("select_actor_raw", "🌍 Mostrar Red Completa")
         st.session_state["actor_seleccionado"] = "" if val == "🌍 Mostrar Red Completa" else val
 
-    opciones_nodos = ["🌍 Mostrar Red Completa"] + sorted(list(prov_df['proveedor']) + list(ent_df['entidad']))
+    # OPTIMIZACIÓN: Limitar opciones de nodos para selectbox más rápido
+    # Si hay más de 50 nodos, solo mostrar los más relevantes
+    max_options = 50
+    proveedores_list = list(prov_df['proveedor'].head(max_options))
+    entidades_list = list(ent_df['entidad'].head(max_options))
+    
+    opciones_nodos = ["🌍 Mostrar Red Completa"] + sorted(proveedores_list + entidades_list)
     
     # Pre-seleccionar si el estado global tiene algo
     idx = 0
@@ -357,7 +395,7 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
     ego_filter = None if nodo_seleccionado == "🌍 Mostrar Red Completa" else nodo_seleccionado
     
     # Construir Grafo en Memoria (0.01 seg)
-    with st.spinner("Renderizando red geométrica..."):
+    with st.spinner("Construyendo red de relaciones..."):
         G = build_graph(edges_df, prov_df, ent_df, ego_node=ego_filter)
     
     if G is None or len(G.nodes) == 0:
