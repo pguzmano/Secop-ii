@@ -13,7 +13,7 @@ import requests
 import streamlit as st
 import plotly.express as px
 import pandas as pd
-from network_analysis import render_network_tab
+from network_analysis import render_network_tab, get_network_raw_data
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RUTAS Y CONFIGURACIÓN
@@ -247,7 +247,34 @@ def get_top_entidades_dep(anio: int, dep_raw: str, n: int = 15) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600, show_spinner="Calculando KPIs...")
 def get_kpis(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -> dict:
-    """KPIs — usa nombres RAW de la API (con acentos) para que el WHERE haga match."""
+    """Calcula KPIs. Usa Socrata para globales (rápido), y DuckDB local para filtros de actor (ultrarápido)."""
+    
+    if actor_filter:
+        # Optimización: Filtrado en memoria usando la data ya descargada para grafos (Fase 1)
+        df_raw = get_network_raw_data(anio, dep_raw, mun_raw)
+        if df_raw.empty:
+            return {"total_valor": 0, "total_contratos": 0, "total_entidades": 0}
+            
+        import duckdb
+        safe_actor = actor_filter.replace("'", "''")
+        res = duckdb.query(f"""
+            SELECT 
+                SUM(CAST(valor_total AS DOUBLE)) AS total_valor,
+                SUM(CAST(contratos AS BIGINT)) AS total_contratos,
+                COUNT(DISTINCT nombre_entidad) AS total_entidades
+            FROM df_raw
+            WHERE upper(proveedor_adjudicado) = '{safe_actor}' 
+               OR upper(nombre_entidad) = '{safe_actor}'
+        """).df()
+        
+        row = res.iloc[0]
+        return {
+            "total_valor": float(row.get("total_valor", 0) or 0),
+            "total_contratos": int(float(row.get("total_contratos", 0) or 0)),
+            "total_entidades": int(float(row.get("total_entidades", 0) or 0)),
+        }
+    
+    # Global: Petición nativa Socrata
     conds = [f"date_extract_y(fecha_de_firma) = {anio}"]
     if dep_raw:
         safe = dep_raw.replace("'", "''")
@@ -255,9 +282,6 @@ def get_kpis(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -> d
     if mun_raw:
         safe = mun_raw.replace("'", "''")
         conds.append(f"upper(ciudad) = '{safe}'")
-    if actor_filter:
-        safe_actor = actor_filter.replace("'", "''")
-        conds.append(f"(upper(proveedor_adjudicado) = '{safe_actor}' OR upper(nombre_entidad) = '{safe_actor}')")
 
     df = soql_get({
         "$select": "SUM(valor_del_contrato) AS total_valor, COUNT(*) AS total_contratos, COUNT(DISTINCT nombre_entidad) AS total_entidades",

@@ -136,15 +136,14 @@ def process_metrics_and_risk(df_raw: pd.DataFrame):
     con.close()
     return edges_df, prov_df, ent_df
 
-def build_graph(edges_df, prov_df, ent_df, ego_node=None):
-    """FASE 5: Grafo Mejorado"""
+@st.cache_resource(show_spinner=False)
+def build_base_graph(edges_df, prov_df, ent_df):
+    """Construye y cachea la red completa una sola vez por municipio"""
     G = nx.Graph()
     
-    # Diccionarios rápidos
     prov_dict = prov_df.set_index('proveedor').to_dict('index')
     ent_dict = ent_df.set_index('entidad').to_dict('index')
     
-    # Para escala de aristas
     max_val = edges_df['valor_total'].max() if not edges_df.empty else 1
     if max_val == 0: max_val = 1
     
@@ -152,10 +151,6 @@ def build_graph(edges_df, prov_df, ent_df, ego_node=None):
         p = row["proveedor"]
         e = row["entidad"]
         mod = row["modalidad"]
-        
-        # Filtrado de subgrafo ego si hay selección
-        if ego_node and p != ego_node and e != ego_node:
-            continue
             
         # Atributos de nodo: Proveedor
         if not G.has_node(p):
@@ -200,6 +195,15 @@ def build_graph(edges_df, prov_df, ent_df, ego_node=None):
             G.add_edge(p, e, weight=row['valor_total'], width=width, color=color_edge, title=t_title)
             
     return G
+
+def build_graph(edges_df, prov_df, ent_df, ego_node=None):
+    """FASE 5: Grafo Mejorado (Instantáneo por Caché)"""
+    G_base = build_base_graph(edges_df, prov_df, ent_df)
+    
+    if ego_node and G_base.has_node(ego_node):
+        return nx.ego_graph(G_base, ego_node, radius=1)
+    
+    return G_base
 
 def generate_alerts(prov_df, edges_df):
     """FASE 8: Alertas Automáticas"""
@@ -299,8 +303,9 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
     
     ego_filter = None if nodo_seleccionado == "🌍 Mostrar Red Completa" else nodo_seleccionado
     
-    # Construir Grafo
-    G = build_graph(edges_df, prov_df, ent_df, ego_node=ego_filter)
+    # Construir Grafo en Memoria (0.01 seg)
+    with st.spinner("Renderizando red geométrica..."):
+        G = build_graph(edges_df, prov_df, ent_df, ego_node=ego_filter)
     
     if G is None or len(G.nodes) == 0:
         st.warning("El grafo resultante está vacío para este filtro.")
