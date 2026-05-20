@@ -386,12 +386,31 @@ def create_pyvis_html(G):
 
 def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
     """Renderiza la pestaña de análisis de redes con manejo de errores robusto."""
+    
+    # DEBUG: Mostrar parámetros recibidos
+    print(f"[render_network_tab] anio={anio}, dep_raw='{dep_raw}', mun_raw='{mun_raw}'")
+    
     st.markdown("""
     <div style='margin-bottom:15px;'>
         <h2 style='font-size:1.4rem;font-weight:900;color:#fff;margin:0;'>🕸️ Detección Estructural de Riesgos y Grafos Enriquecidos</h2>
         <p style='color:#64748B;font-size:.85rem;margin:4px 0 0;'>Sistema experto en grafos que detecta fragmentación, carruseles de contratación directa y transversalidad estructural.</p>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Mostrar filtros activos
+    filtros_activos = []
+    if dep_raw:
+        filtros_activos.append(f"📍 Departamento: {dep_raw}")
+    if mun_raw:
+        filtros_activos.append(f"🏙️ Municipio: {mun_raw}")
+    
+    if filtros_activos:
+        st.markdown(f"""
+        <div style='background:rgba(79,142,247,.1);border:1px solid rgba(79,142,247,.25);
+                    border-radius:8px;padding:10px;margin-bottom:15px;font-size:.8rem;'>
+            <b>🔍 Filtros activos:</b> {' | '.join(filtros_activos)}
+        </div>
+        """, unsafe_allow_html=True)
     
     # FASE 1: Consulta API
     with st.spinner("Consultando datos contractuales..."):
