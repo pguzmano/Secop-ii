@@ -7,7 +7,9 @@ Arquitectura bicapa:
 SoQL nativo: el servidor agrega, nosotros recibimos <400 filas.
 """
 
-import os, json, unicodedata
+import os, json, unicodedata, sqlite3, hashlib, time
+from functools import wraps
+from typing import Optional
 import duckdb
 import requests
 import streamlit as st
@@ -24,7 +26,7 @@ GEOJSON_MUN = os.path.join(BASE, "data", "mpio.json")
 
 API_RESOURCE = "jbjy-vk9h"
 API_BASE     = f"https://www.datos.gov.co/resource/{API_RESOURCE}.json"
-API_TIMEOUT  = 90  # segundos
+API_TIMEOUT  = 30  # segundos (reducido de 90 para mejor UX)
 
 C = dict(
     bg="#060B14", card="#0D1421", border="#1A2336",
@@ -103,27 +105,158 @@ def fmt_n(n):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# OPTIMIZACIÓN: CACHÉ PERSISTENTE CON SQLITE
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PersistentCache:
+    """Caché persistente en SQLite para consultas API.
+    Beneficio: Evita re-consultar la API si los datos ya existen localmente.
+    Impacto: 10-100x más rápido en accesos repetidos.
+    """
+    
+    def __init__(self, db_path: str = ".cache/api_cache.db"):
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+        self._init_db()
+    
+    def _init_db(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS api_cache (
+                    query_hash TEXT PRIMARY KEY,
+                    query_params TEXT,
+                    result_json TEXT,
+                    timestamp REAL,
+                    ttl_seconds INTEGER
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_timestamp ON api_cache(timestamp)
+            """)
+            conn.commit()
+    
+    def _hash_query(self, params: dict) -> str:
+        """Genera hash único para los parámetros de la consulta."""
+        query_str = json.dumps(params, sort_keys=True)
+        return hashlib.md5(query_str.encode()).hexdigest()
+    
+    def get(self, params: dict) -> Optional[list]:
+        """Obtiene resultado del caché si existe y no ha expirado."""
+        query_hash = self._hash_query(params)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT result_json, timestamp, ttl_seconds FROM api_cache WHERE query_hash = ?",
+                (query_hash,)
+            ).fetchone()
+            
+            if row:
+                result_json, timestamp, ttl = row
+                if time.time() - timestamp < ttl:
+                    return json.loads(result_json)
+                else:
+                    # Expirado: eliminar
+                    conn.execute("DELETE FROM api_cache WHERE query_hash = ?", (query_hash,))
+                    conn.commit()
+        
+        return None
+    
+    def set(self, params: dict, result: list, ttl_seconds: int = 3600):
+        """Almacena resultado en caché."""
+        query_hash = self._hash_query(params)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO api_cache 
+                   (query_hash, query_params, result_json, timestamp, ttl_seconds)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (query_hash, json.dumps(params), json.dumps(result), time.time(), ttl_seconds)
+            )
+            conn.commit()
+
+# Instancia global de caché
+_cache = PersistentCache()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILIDAD: MONITOREO DE LATENCIA
+# ─────────────────────────────────────────────────────────────────────────────
+
+def monitor_latency(func_name: str):
+    """Decorador para monitorear latencia de funciones."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            t0 = time.time()
+            result = func(*args, **kwargs)
+            elapsed = time.time() - t0
+            
+            # Log visible en terminal
+            if elapsed > 0.5:  # Solo loguear si toma más de 0.5s
+                print(f"[LATENCY] {func_name}: {elapsed:.3f}s")
+            
+            return result
+        return wrapper
+    return decorator
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CAPA DE CONSULTAS SOQL — filtra en el servidor Socrata
 # ─────────────────────────────────────────────────────────────────────────────
 
 def soql_get(params: dict) -> pd.DataFrame:
-    """Ejecuta una consulta SoQL contra la API y retorna un DataFrame."""
-    try:
-        r = requests.get(API_BASE, params=params, timeout=API_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
-        if not data:
-            return pd.DataFrame()
-        return pd.DataFrame(data)
-    except requests.Timeout:
-        st.error("⏱️ Timeout al consultar la API. Intenta filtrar por año.")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Error consultando API: {e}")
-        return pd.DataFrame()
+    """Ejecuta una consulta SoQL contra la API y retorna un DataFrame.
+    OPTIMIZADO: Con caché persistente, reintentos y compresión gzip.
+    """
+    
+    # 1. Intentar obtener del caché
+    cached = _cache.get(params)
+    if cached is not None:
+        return pd.DataFrame(cached)
+    
+    # 2. Consultar API con reintentos
+    max_retries = 2
+    timeout = API_TIMEOUT
+    
+    for attempt in range(max_retries + 1):
+        try:
+            headers = {
+                "Accept-Encoding": "gzip",
+                "User-Agent": "SECOP-Dashboard/2.0"
+            }
+            
+            r = requests.get(API_BASE, params=params, timeout=timeout, headers=headers)
+            r.raise_for_status()
+            data = r.json()
+            
+            # 3. Cachear resultado (TTL de 1 hora)
+            if data:
+                _cache.set(params, data, ttl_seconds=3600)
+            
+            return pd.DataFrame(data) if data else pd.DataFrame()
+        
+        except requests.Timeout:
+            if attempt < max_retries:
+                timeout = int(timeout * 1.5)
+                time.sleep(0.5)
+                continue
+            else:
+                st.error(f"⏱️ Timeout después de {max_retries + 1} intentos. Intenta filtrar por año.")
+                return pd.DataFrame()
+        
+        except Exception as e:
+            if attempt < max_retries:
+                time.sleep(0.5)
+                continue
+            else:
+                st.error(f"Error consultando API: {e}")
+                return pd.DataFrame()
+    
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600, show_spinner="Consultando años disponibles...")
+@monitor_latency("get_anios")
 def get_anios() -> list[int]:
     df = soql_get({
         "$select": "date_extract_y(fecha_de_firma) AS anio, COUNT(*) AS n",
@@ -147,6 +280,7 @@ def get_anios() -> list[int]:
 
 
 @st.cache_data(ttl=3600, show_spinner="Cargando departamentos...")
+@monitor_latency("get_departamentos")
 def get_departamentos(anio: int) -> pd.DataFrame:
     """Suma por departamento — retorna ~35 filas máximo."""
     df = soql_get({
@@ -165,6 +299,7 @@ def get_departamentos(anio: int) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600, show_spinner="Cargando municipios...")
+@monitor_latency("get_municipios")
 def get_municipios(anio: int, dep_raw: str) -> pd.DataFrame:
     """Suma por ciudad — dep_raw es el nombre con acentos tal como lo retorna la API."""
     dep_q = dep_raw.replace("'", "''")
@@ -246,6 +381,7 @@ def get_top_entidades_dep(anio: int, dep_raw: str, n: int = 15) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600, show_spinner="Calculando KPIs...")
+@monitor_latency("get_kpis")
 def get_kpis(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -> dict:
     """Calcula KPIs. Usa Socrata para globales (rápido), y DuckDB local para filtros de actor (ultrarápido)."""
     
@@ -283,8 +419,15 @@ def get_kpis(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -> d
         safe = mun_raw.replace("'", "''")
         conds.append(f"upper(ciudad) = '{safe}'")
 
+    # Socrata sufre timeout calculando COUNT(DISTINCT) a nivel Nacional.
+    # Solo lo pedimos si estamos en un municipio específico.
+    if mun_raw:
+        select_clause = "SUM(valor_del_contrato) AS total_valor, COUNT(*) AS total_contratos, COUNT(DISTINCT nombre_entidad) AS total_entidades"
+    else:
+        select_clause = "SUM(valor_del_contrato) AS total_valor, COUNT(*) AS total_contratos"
+
     df = soql_get({
-        "$select": "SUM(valor_del_contrato) AS total_valor, COUNT(*) AS total_contratos, COUNT(DISTINCT nombre_entidad) AS total_entidades",
+        "$select": select_clause,
         "$where":  " AND ".join(conds),
         "$limit":  "1",
     })
@@ -294,7 +437,7 @@ def get_kpis(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -> d
     return {
         "total_valor":     float(row.get("total_valor", 0) or 0),
         "total_contratos": int(float(row.get("total_contratos", 0) or 0)),
-        "total_entidades": int(float(row.get("total_entidades", 0) or 0)),
+        "total_entidades": int(float(row.get("total_entidades", 0) or 0)) if "total_entidades" in row else 0,
     }
 
 

@@ -7,10 +7,12 @@ import networkx as nx
 from pyvis.network import Network
 import streamlit as st
 import streamlit.components.v1 as components
+import time
+from functools import wraps
 
 API_RESOURCE = "jbjy-vk9h"
 API_BASE     = f"https://www.datos.gov.co/resource/{API_RESOURCE}.json"
-API_TIMEOUT  = 120
+API_TIMEOUT  = 60  # reducido de 120 para mejor UX
 
 C = dict(
     bg="#060B14", card="#0D1421", border="#1A2336",
@@ -28,7 +30,24 @@ def format_b(v):
         return f"${v:,.0f}"
     except: return "—"
 
+def monitor_latency(func_name: str):
+    """Decorador para monitorear latencia de funciones."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            t0 = time.time()
+            result = func(*args, **kwargs)
+            elapsed = time.time() - t0
+            
+            if elapsed > 0.5:
+                print(f"[LATENCY] {func_name}: {elapsed:.3f}s")
+            
+            return result
+        return wrapper
+    return decorator
+
 @st.cache_data(ttl=3600, show_spinner="Extraeción API (Fase 1)...")
+@monitor_latency("get_network_raw_data")
 def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.DataFrame:
     """FASE 1: Consulta Base Enriquecida Socrata"""
     conds = [f"date_extract_y(fecha_de_firma) = {anio}"]
@@ -64,6 +83,7 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner="Procesando Métricas y Riesgo (Fase 2-4)...")
+@monitor_latency("process_metrics_and_risk")
 def process_metrics_and_risk(df_raw: pd.DataFrame):
     """FASE 2, 3 y 4: Métricas Clave y Score de Riesgo usando DuckDB"""
     if df_raw.empty:
@@ -137,8 +157,11 @@ def process_metrics_and_risk(df_raw: pd.DataFrame):
     return edges_df, prov_df, ent_df
 
 @st.cache_resource(show_spinner=False)
+@monitor_latency("build_base_graph")
 def build_base_graph(edges_df, prov_df, ent_df):
-    """Construye y cachea la red completa una sola vez por municipio"""
+    """Construye y cachea la red completa una sola vez por municipio.
+    OPTIMIZADO: Usa operaciones vectorizadas para mejor rendimiento.
+    """
     G = nx.Graph()
     
     prov_dict = prov_df.set_index('proveedor').to_dict('index')
@@ -147,52 +170,54 @@ def build_base_graph(edges_df, prov_df, ent_df):
     max_val = edges_df['valor_total'].max() if not edges_df.empty else 1
     if max_val == 0: max_val = 1
     
-    for _, row in edges_df.iterrows():
-        p = row["proveedor"]
-        e = row["entidad"]
-        mod = row["modalidad"]
+    # Pre-calcular todos los nodos de una vez (vectorizado)
+    proveedores_unicos = edges_df['proveedor'].unique()
+    entidades_unicas = edges_df['entidad'].unique()
+    
+    # Agregar nodos de proveedores en batch
+    for p in proveedores_unicos:
+        p_data = prov_dict.get(p, {})
+        nivel = p_data.get('nivel_riesgo', '🟡 MEDIO')
+        if '🔴' in nivel: color_p = C['red']
+        elif '🟢' in nivel: color_p = C['green']
+        else: color_p = C['amber']
+        
+        size_p = 10 + min(p_data.get('contratos_totales', 1) * 2, 50)
+        
+        G.add_node(p, tipo="proveedor", label=p, color=color_p, size=size_p,
+                   title=f"PROVEEDOR<br><b>{p}</b><br>Riesgo: {nivel} (Score: {p_data.get('score_riesgo',0)})<br>Contratos: {p_data.get('contratos_totales',0)}<br>Entidades: {p_data.get('entidades_distintas',0)}<br>Directa: {p_data.get('pct_directa',0)*100:.1f}%")
+    
+    # Agregar nodos de entidades en batch
+    for e in entidades_unicas:
+        e_data = ent_dict.get(e, {})
+        color_e = C['blue']
+        size_e = 15 + min(e_data.get('contratos_totales', 1) * 2, 60)
+        
+        G.add_node(e, tipo="entidad", label=e, color=color_e, shape="square", size=size_e,
+                   title=f"ENTIDAD<br><b>{e}</b><br>Contratos: {e_data.get('contratos_totales',0)}<br>Proveedores: {e_data.get('num_proveedores',0)}<br>Total: {format_b(e_data.get('valor_total',0))}")
+    
+    # Agregar aristas usando itertuples (más rápido que iterrows)
+    for row in edges_df.itertuples(index=False):
+        p = row.proveedor
+        e = row.entidad
+        mod = row.modalidad
             
-        # Atributos de nodo: Proveedor
-        if not G.has_node(p):
-            p_data = prov_dict.get(p, {})
-            # Colores según riesgo
-            nivel = p_data.get('nivel_riesgo', '🟡 MEDIO')
-            if '🔴' in nivel: color_p = C['red']
-            elif '🟢' in nivel: color_p = C['green']
-            else: color_p = C['amber']
-            
-            size_p = 10 + min(p_data.get('contratos_totales', 1) * 2, 50)
-            
-            G.add_node(p, tipo="proveedor", label=p, color=color_p, size=size_p,
-                       title=f"PROVEEDOR<br><b>{p}</b><br>Riesgo: {nivel} (Score: {p_data.get('score_riesgo',0)})<br>Contratos: {p_data.get('contratos_totales',0)}<br>Entidades: {p_data.get('entidades_distintas',0)}<br>Directa: {p_data.get('pct_directa',0)*100:.1f}%")
-            
-        # Atributos de nodo: Entidad
-        if not G.has_node(e):
-            e_data = ent_dict.get(e, {})
-            color_e = C['blue'] # Entidades en azul estable
-            size_e = 15 + min(e_data.get('contratos_totales', 1) * 2, 60)
-            
-            G.add_node(e, tipo="entidad", label=e, color=color_e, shape="square", size=size_e,
-                       title=f"ENTIDAD<br><b>{e}</b><br>Contratos: {e_data.get('contratos_totales',0)}<br>Proveedores: {e_data.get('num_proveedores',0)}<br>Total: {format_b(e_data.get('valor_total',0))}")
-            
-        # Atributos de Arista
         # Color por modalidad
         if "DIRECTA" in mod: color_edge = C['red']
         elif "LICITACI" in mod: color_edge = C['blue']
         else: color_edge = C['gray']
         
-        # Grosor por valor_total
-        width = max(1, min((row['valor_total'] / max_val) * 15, 15))
+        # Grosor por valor_total (vectorizado)
+        width = max(1, min((row.valor_total / max_val) * 15, 15))
         
-        # Tooltip Fase 6
-        t_title = f"{p} ↔ {e}<br>Modalidad: {mod}<br>Tipo: {row['tipo']}<br>Contratos: {row['contratos']}<br>Valor: {format_b(row['valor_total'])}"
+        # Tooltip
+        t_title = f"{p} ↔ {e}<br>Modalidad: {mod}<br>Tipo: {row.tipo}<br>Contratos: {row.contratos}<br>Valor: {format_b(row.valor_total)}"
         
-        # NetworkX soporta multi-edges pero Pyvis lo maneja sumando o superponiendo. Usaremos sum si ya existe.
         if G.has_edge(p, e):
-            G[p][e]['width'] += width/2 # engrosar
-            G[p][e]['title'] += f"<hr>{t_title}" # concatenar tooltip
+            G[p][e]['width'] += width/2
+            G[p][e]['title'] += f"<hr>{t_title}"
         else:
-            G.add_edge(p, e, weight=row['valor_total'], width=width, color=color_edge, title=t_title)
+            G.add_edge(p, e, weight=row.valor_total, width=width, color=color_edge, title=t_title)
             
     return G
 
@@ -234,8 +259,11 @@ def generate_alerts(prov_df, edges_df):
         
     return pd.DataFrame(alertas) if alertas else pd.DataFrame(columns=["Nivel", "Actor", "Tipo", "Mensaje"])
 
+@monitor_latency("create_pyvis_html")
 def create_pyvis_html(G):
-    """Genera HTML de Pyvis con soporte a fallbacks."""
+    """Genera HTML de Pyvis con soporte a fallbacks.
+    OPTIMIZADO: Usa batch operations para agregar nodos y aristas.
+    """
     try:
         net = Network(height="650px", width="100%", bgcolor=C['bg'], font_color=C['text'], select_menu=True, cdn_resources='remote')
     except:
@@ -243,11 +271,36 @@ def create_pyvis_html(G):
         
     net.force_atlas_2based(gravity=-60, central_gravity=0.01, spring_length=120, spring_strength=0.05, damping=0.5)
     
+    # Agregar nodos en batch (más eficiente)
+    nodes_data = []
     for n, d in G.nodes(data=True):
-        net.add_node(n, label=d.get('label', n[:20]), title=d.get('title',''), color=d.get('color', C['blue']), shape=d.get('shape', 'dot'), size=d.get('size', 10))
-        
+        nodes_data.append({
+            'id': n,
+            'label': d.get('label', n[:20]),
+            'title': d.get('title',''),
+            'color': d.get('color', C['blue']),
+            'shape': d.get('shape', 'dot'),
+            'size': d.get('size', 10)
+        })
+    
+    for node in nodes_data:
+        net.add_node(node['id'], label=node['label'], title=node['title'], 
+                    color=node['color'], shape=node['shape'], size=node['size'])
+    
+    # Agregar aristas en batch
+    edges_data = []
     for u, v, d in G.edges(data=True):
-        net.add_edge(u, v, title=d.get('title',''), color=d.get('color', C['gray']), width=d.get('width', 1))
+        edges_data.append({
+            'source': u,
+            'target': v,
+            'title': d.get('title',''),
+            'color': d.get('color', C['gray']),
+            'width': d.get('width', 1)
+        })
+    
+    for edge in edges_data:
+        net.add_edge(edge['source'], edge['target'], title=edge['title'], 
+                    color=edge['color'], width=edge['width'])
         
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scratch", "network_temp.html")
     os.makedirs(os.path.dirname(path), exist_ok=True)

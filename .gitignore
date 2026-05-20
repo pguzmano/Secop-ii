@@ -9,6 +9,8 @@ __pycache__/
 scratch/
 .streamlit/
 .gemini/
+.cache/
+.logs/
 
 # Entornos virtuales
 .venv/
