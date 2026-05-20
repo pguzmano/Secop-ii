@@ -23,9 +23,13 @@ def benchmark_cache():
     
     from app import _cache
     
-    # Limpiar caché anterior
-    if os.path.exists(".cache/api_cache.db"):
-        os.remove(".cache/api_cache.db")
+    # Limpiar caché anterior (si no está en uso)
+    cache_db = ".cache/api_cache.db"
+    if os.path.exists(cache_db):
+        try:
+            os.remove(cache_db)
+        except PermissionError:
+            print("⚠️ Caché anterior en uso, continuando con pruebas...")
     
     # Simular consulta
     test_params = {
