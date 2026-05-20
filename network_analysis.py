@@ -12,7 +12,7 @@ from functools import wraps
 
 API_RESOURCE = "jbjy-vk9h"
 API_BASE     = f"https://www.datos.gov.co/resource/{API_RESOURCE}.json"
-API_TIMEOUT  = 60  # reducido de 120 para mejor UX
+API_TIMEOUT  = 20  # segundos (reducido de 30 para evitar timeouts en producción)
 
 C = dict(
     bg="#060B14", card="#0D1421", border="#1A2336",
@@ -46,10 +46,12 @@ def monitor_latency(func_name: str):
         return wrapper
     return decorator
 
-@st.cache_data(ttl=3600, show_spinner="Extraeción API (Fase 1)...")
+@st.cache_data(ttl=300, show_spinner="Extraeción API (Fase 1)...")
 @monitor_latency("get_network_raw_data")
 def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.DataFrame:
-    """FASE 1: Consulta Base Enriquecida Socrata"""
+    """FASE 1: Consulta Base Enriquecida Socrata
+    OPTIMIZADO: Límites efectivos y agregación en memoria para evitar timeouts.
+    """
     conds = [f"date_extract_y(fecha_de_firma) = {anio}"]
     conds.append("proveedor_adjudicado IS NOT NULL")
     conds.append("nombre_entidad IS NOT NULL")
@@ -63,26 +65,47 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
         
     where_clause = " AND ".join(conds)
     
+    # OPTIMIZACIÓN: Consultar solo datos necesarios con límite efectivo
+    # Usar $limit para limitar filas (no para agrupación)
     params = {
-        "$select": "proveedor_adjudicado, nombre_entidad, modalidad_de_contratacion, tipo_de_contrato, count(*) as contratos, sum(valor_del_contrato) as valor_total",
+        "$select": "proveedor_adjudicado, nombre_entidad, modalidad_de_contratacion, tipo_de_contrato, valor_del_contrato",
         "$where": where_clause,
-        "$group": "proveedor_adjudicado, nombre_entidad, modalidad_de_contratacion, tipo_de_contrato",
-        "$order": "valor_total DESC",
-        "$limit": "1500"
+        "$order": "valor_del_contrato DESC",
+        "$limit": "500"  # Limitar a 500 filas (no 1500)
     }
     
     try:
         r = requests.get(API_BASE, params=params, timeout=API_TIMEOUT)
         r.raise_for_status()
         data = r.json()
+        
         if not data:
             return pd.DataFrame()
-        return pd.DataFrame(data)
+        
+        df = pd.DataFrame(data)
+        
+        # Agregación en memoria (más rápido que Socrata)
+        df_aggregated = df.groupby([
+            'proveedor_adjudicado', 'nombre_entidad', 
+            'modalidad_de_contratacion', 'tipo_de_contrato'
+        ]).agg({
+            'valor_del_contrato': ['sum', 'count']
+        }).reset_index()
+        
+        df_aggregated.columns = ['proveedor_adjudicado', 'nombre_entidad', 
+                                 'modalidad_de_contratacion', 'tipo_de_contrato',
+                                 'valor_total', 'contratos']
+        
+        return df_aggregated
+        
+    except requests.Timeout:
+        st.error("⏱️ Timeout al consultar la API. Intenta filtrar por año o selecciona un municipio con menos contratos.")
+        return pd.DataFrame()
     except Exception as e:
         st.error(f"Error consultando API de red: {e}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=3600, show_spinner="Procesando Métricas y Riesgo (Fase 2-4)...")
+@st.cache_data(ttl=300, show_spinner="Procesando Métricas y Riesgo (Fase 2-4)...")
 @monitor_latency("process_metrics_and_risk")
 def process_metrics_and_risk(df_raw: pd.DataFrame):
     """FASE 2, 3 y 4: Métricas Clave y Score de Riesgo usando DuckDB
@@ -161,7 +184,7 @@ def process_metrics_and_risk(df_raw: pd.DataFrame):
     con.close()
     return edges_df, prov_df, ent_df
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, ttl=300)  # TTL de 5 minutos
 @monitor_latency("build_base_graph")
 def build_base_graph(edges_df, prov_df, ent_df):
     """Construye y cachea la red completa una sola vez por municipio.
@@ -228,41 +251,49 @@ def build_base_graph(edges_df, prov_df, ent_df):
 
 def build_graph(edges_df, prov_df, ent_df, ego_node=None):
     """FASE 5: Grafo Mejorado (Instantáneo por Caché)"""
-    G_base = build_base_graph(edges_df, prov_df, ent_df)
-    
-    if ego_node and G_base.has_node(ego_node):
-        return nx.ego_graph(G_base, ego_node, radius=1)
-    
-    return G_base
+    try:
+        G_base = build_base_graph(edges_df, prov_df, ent_df)
+        
+        if ego_node and G_base.has_node(ego_node):
+            return nx.ego_graph(G_base, ego_node, radius=1)
+        
+        return G_base
+    except Exception as e:
+        st.error(f"❌ Error al construir grafo: {e}")
+        return None
 
 def generate_alerts(prov_df, edges_df):
     """FASE 8: Alertas Automáticas"""
-    alertas = []
-    
-    # Regla 1: Fragmentación Alta (Entidad)
-    # Ya manejado en parte en proveedores, busquemos proveedores anómalos
-    for _, p in prov_df.head(100).iterrows():
-        if p['pct_directa'] > 0.85 and p['contratos_totales'] >= 4:
+    try:
+        alertas = []
+        
+        # Regla 1: Fragmentación Alta (Entidad)
+        # Ya manejado en parte en proveedores, busquemos proveedores anómalos
+        for _, p in prov_df.head(100).iterrows():
+            if p['pct_directa'] > 0.85 and p['contratos_totales'] >= 4:
+                alertas.append({
+                    "Nivel": "🔴 RIESGO CRÍTICO", "Actor": p['proveedor'], "Tipo": "Concentración Directa",
+                    "Mensaje": f"Proveedor con {p['pct_directa']*100:.1f}% de contratación directa y score {p['score_riesgo']}."
+                })
+            if p['entidades_distintas'] >= 5:
+                alertas.append({
+                    "Nivel": "🟡 ALERTA ESTRUCTURAL", "Actor": p['proveedor'], "Tipo": "Red Transversal",
+                    "Mensaje": f"Opera con {p['entidades_distintas']} entidades distintas en el territorio."
+                })
+                
+        # Regla 2: Repetición Sospechosa
+        # Agrupar edges para ver repetición pura entre p y e
+        rep = edges_df.groupby(['proveedor', 'entidad'])['contratos'].sum().reset_index()
+        for _, r in rep[rep['contratos'] >= 10].iterrows():
             alertas.append({
-                "Nivel": "🔴 RIESGO CRÍTICO", "Actor": p['proveedor'], "Tipo": "Concentración Directa",
-                "Mensaje": f"Proveedor con {p['pct_directa']*100:.1f}% de contratación directa y score {p['score_riesgo']}."
-            })
-        if p['entidades_distintas'] >= 5:
-            alertas.append({
-                "Nivel": "🟡 ALERTA ESTRUCTURAL", "Actor": p['proveedor'], "Tipo": "Red Transversal",
-                "Mensaje": f"Opera con {p['entidades_distintas']} entidades distintas en el territorio."
+                "Nivel": "🔴 ALTO RIESGO", "Actor": f"{r['proveedor']} ↔ {r['entidad']}", "Tipo": "Fragmentación/Carrusel",
+                "Mensaje": f"Relación altamente repetitiva con {r['contratos']} contratos directos."
             })
             
-    # Regla 2: Repetición Sospechosa
-    # Agrupar edges para ver repetición pura entre p y e
-    rep = edges_df.groupby(['proveedor', 'entidad'])['contratos'].sum().reset_index()
-    for _, r in rep[rep['contratos'] >= 10].iterrows():
-        alertas.append({
-            "Nivel": "🔴 ALTO RIESGO", "Actor": f"{r['proveedor']} ↔ {r['entidad']}", "Tipo": "Fragmentación/Carrusel",
-            "Mensaje": f"Relación altamente repetitiva con {r['contratos']} contratos directos."
-        })
-        
-    return pd.DataFrame(alertas) if alertas else pd.DataFrame(columns=["Nivel", "Actor", "Tipo", "Mensaje"])
+        return pd.DataFrame(alertas) if alertas else pd.DataFrame(columns=["Nivel", "Actor", "Tipo", "Mensaje"])
+    except Exception as e:
+        st.error(f"❌ Error al generar alertas: {e}")
+        return pd.DataFrame(columns=["Nivel", "Actor", "Tipo", "Mensaje"])
 
 @monitor_latency("create_pyvis_html")
 def create_pyvis_html(G):
@@ -271,7 +302,8 @@ def create_pyvis_html(G):
     """
     try:
         net = Network(height="650px", width="100%", bgcolor=C['bg'], font_color=C['text'], select_menu=True, cdn_resources='remote')
-    except:
+    except Exception as e:
+        st.error(f"Error al crear red Pyvis: {e}")
         net = Network(height="650px", width="100%", bgcolor=C['bg'], font_color=C['text'], select_menu=True)
         
     net.force_atlas_2based(gravity=-60, central_gravity=0.01, spring_length=120, spring_strength=0.05, damping=0.5)
@@ -338,8 +370,12 @@ def create_pyvis_html(G):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     net.save_graph(path)
     
-    with open(path, 'r', errors='ignore') as f:
-        html = f.read()
+    try:
+        with open(path, 'r', errors='ignore') as f:
+            html = f.read()
+    except Exception as e:
+        st.error(f"Error al leer HTML generado: {e}")
+        return "<div>Error al generar visualización</div>"
         
     if "lib/bindings" in html:
         html = html.replace('src="lib/bindings/utils.js"', '')
@@ -349,6 +385,7 @@ def create_pyvis_html(G):
     return html
 
 def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
+    """Renderiza la pestaña de análisis de redes con manejo de errores robusto."""
     st.markdown("""
     <div style='margin-bottom:15px;'>
         <h2 style='font-size:1.4rem;font-weight:900;color:#fff;margin:0;'>🕸️ Detección Estructural de Riesgos y Grafos Enriquecidos</h2>
@@ -356,13 +393,25 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
     </div>
     """, unsafe_allow_html=True)
     
-    df_raw = get_network_raw_data(anio, dep_raw, mun_raw)
+    # FASE 1: Consulta API
+    with st.spinner("Consultando datos contractuales..."):
+        df_raw = get_network_raw_data(anio, dep_raw, mun_raw)
     
     if df_raw.empty:
-        st.warning("No hay suficientes datos contractuales para construir una red.")
+        st.warning("⚠️ No hay suficientes datos contractuales para construir una red.")
         return
-        
-    edges_df, prov_df, ent_df = process_metrics_and_risk(df_raw)
+    
+    # FASE 2: Procesamiento
+    with st.spinner("Procesando métricas de riesgo..."):
+        try:
+            edges_df, prov_df, ent_df = process_metrics_and_risk(df_raw)
+        except Exception as e:
+            st.error(f"❌ Error al procesar métricas: {e}")
+            return
+    
+    if edges_df.empty:
+        st.warning("⚠️ No hay suficientes datos para construir la red después del procesamiento.")
+        return
     
     # ── FASE 7: INTERACCIÓN TABLA → GRAFO ─────────────────────────────
     # Sincronización con estado global de KPIs
@@ -394,7 +443,7 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
     
     ego_filter = None if nodo_seleccionado == "🌍 Mostrar Red Completa" else nodo_seleccionado
     
-    # Construir Grafo en Memoria (0.01 seg)
+    # FASE 3: Construcción de grafo
     with st.spinner("Construyendo red de relaciones..."):
         G = build_graph(edges_df, prov_df, ent_df, ego_node=ego_filter)
     

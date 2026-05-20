@@ -255,7 +255,7 @@ def soql_get(params: dict) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-@st.cache_data(ttl=3600, show_spinner="Consultando años disponibles...")
+@st.cache_data(ttl=300, show_spinner="Consultando años disponibles...")
 @monitor_latency("get_anios")
 def get_anios() -> list[int]:
     df = soql_get({
@@ -279,7 +279,7 @@ def get_anios() -> list[int]:
     return anios if anios else [2026, 2025, 2024, 2023]
 
 
-@st.cache_data(ttl=3600, show_spinner="Cargando departamentos...")
+@st.cache_data(ttl=300, show_spinner="Cargando departamentos...")
 @monitor_latency("get_departamentos")
 def get_departamentos(anio: int) -> pd.DataFrame:
     """Suma por departamento — retorna ~35 filas máximo."""
@@ -298,7 +298,7 @@ def get_departamentos(anio: int) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner="Cargando municipios...")
+@st.cache_data(ttl=300, show_spinner="Cargando municipios...")
 @monitor_latency("get_municipios")
 def get_municipios(anio: int, dep_raw: str) -> pd.DataFrame:
     """Suma por ciudad — dep_raw es el nombre con acentos tal como lo retorna la API."""
@@ -320,7 +320,7 @@ def get_municipios(anio: int, dep_raw: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner="Cargando entidades...")
+@st.cache_data(ttl=300, show_spinner="Cargando entidades...")
 def get_entidades(anio: int, mun_raw: str) -> pd.DataFrame:
     """Top 20 entidades — mun_raw es el nombre con acentos tal como lo retorna la API."""
     mun_q = mun_raw.replace("'", "''")
@@ -341,7 +341,7 @@ def get_entidades(anio: int, mun_raw: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner="Cargando ranking nacional...")
+@st.cache_data(ttl=300, show_spinner="Cargando ranking nacional...")
 def get_top_entidades_global(anio: int, n: int = 20) -> pd.DataFrame:
     """Top N entidades a nivel nacional. CAPA GLOBAL — sin filtro territorial."""
     df = soql_get({
@@ -359,7 +359,7 @@ def get_top_entidades_global(anio: int, n: int = 20) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner="Cargando ranking por departamento...")
+@st.cache_data(ttl=300, show_spinner="Cargando ranking por departamento...")
 def get_top_entidades_dep(anio: int, dep_raw: str, n: int = 15) -> pd.DataFrame:
     """Top N entidades dentro de un departamento — usa dep_raw con acentos."""
     dep_q = dep_raw.replace("'", "''")
@@ -380,7 +380,7 @@ def get_top_entidades_dep(anio: int, dep_raw: str, n: int = 15) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner="Calculando KPIs...")
+@st.cache_data(ttl=300, show_spinner="Calculando KPIs...")
 @monitor_latency("get_kpis")
 def get_kpis(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -> dict:
     """Calcula KPIs. Usa Socrata para globales (rápido), y DuckDB local para filtros de actor (ultrarápido)."""
@@ -446,10 +446,16 @@ def get_kpis(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -> d
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_geojson(path: str) -> dict | None:
-    if not os.path.exists(path):
+    """Carga GeoJSON con manejo de errores robusto."""
+    try:
+        if not os.path.exists(path):
+            st.error(f"⚠️ Archivo GeoJSON no encontrado: {path}")
+            return None
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        st.error(f"❌ Error al cargar GeoJSON ({path}): {e}")
         return None
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -518,12 +524,12 @@ def render_kpis(anio, dep, mun, actor_filter=""):
 def render_mapa_departamentos(anio: int):
     geo = load_geojson(GEOJSON)
     if not geo:
-        st.error("GeoJSON de departamentos no encontrado.")
+        st.error("⚠️ GeoJSON de departamentos no encontrado. Verifica que el archivo data/depto.json exista.")
         return
 
     df_secop = get_departamentos(anio)
     if df_secop.empty:
-        st.warning("Sin datos de departamentos para el año seleccionado.")
+        st.warning("⚠️ Sin datos de departamentos para el año seleccionado.")
         return
 
     # dep_raw = nombre tal como viene de la API (con acentos, para WHERE)
@@ -586,7 +592,7 @@ def render_mapa_municipios(anio: int, dep_norm: str, dep_raw: str):
     """dep_norm = sin acentos (para filtrar GeoJSON). dep_raw = nombre API (para WHERE)."""
     geo = load_geojson(GEOJSON_MUN)
     if not geo:
-        st.error("GeoJSON de municipios no encontrado.")
+        st.error("⚠️ GeoJSON de municipios no encontrado. Verifica que el archivo data/mpio.json exista.")
         return
 
     # Consultar municipios usando dep_raw (con acentos) para que el WHERE haga match
@@ -599,7 +605,7 @@ def render_mapa_municipios(anio: int, dep_norm: str, dep_raw: str):
     base_muns = [f for f in geo["features"] if normalizar(f["properties"].get("NOMBRE_DPT", "")) == dep_norm]
 
     if not base_muns:
-        st.warning(f"Sin geometrías para municipios de {dep_norm}.")
+        st.warning(f"⚠️ Sin geometrías para municipios de {dep_norm}.")
         return
 
     base = pd.DataFrame([{
