@@ -1,0 +1,17 @@
+# SECOP II Dashboard — Dependencias
+# Instalar con: pip install -r requirements.txt
+
+# Motor de datos
+polars>=0.20.0
+duckdb>=0.10.0
+pyarrow>=14.0.0      # backend para Parquet en Polars
+
+# Frontend
+streamlit>=1.32.0
+plotly>=5.20.0
+
+# Compatibilidad pandas (para Styler en V4 y Plotly internals)
+pandas>=2.0.0
+
+# Utilidades opcionales (recomendadas)
+tqdm>=4.66.0         # barra de progreso en ETL
