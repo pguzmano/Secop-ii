@@ -195,12 +195,15 @@ def process_metrics_and_risk(df_raw: pd.DataFrame):
     con.close()
     return edges_df, prov_df, ent_df
 
-@st.cache_resource(show_spinner=False, ttl=300)  # TTL de 5 minutos
+@st.cache_data(show_spinner=False, ttl=300, hash_funcs={pd.DataFrame: lambda df: hash(tuple(df.values.tobytes()))})
 @monitor_latency("build_base_graph")
 def build_base_graph(edges_df, prov_df, ent_df):
     """Construye y cachea la red completa una sola vez por municipio.
     OPTIMIZADO: Usa operaciones vectorizadas para mejor rendimiento.
+    CORREGIDO: Usa cache_data con hash explícito para invalidar correctamente cuando cambian los datos.
     """
+    print(f"[build_base_graph] Construyendo grafo con {len(edges_df)} aristas")
+    
     G = nx.Graph()
     
     prov_dict = prov_df.set_index('proveedor').to_dict('index')
