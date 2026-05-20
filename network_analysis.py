@@ -52,6 +52,8 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
     """FASE 1: Consulta Base Enriquecida Socrata
     OPTIMIZADO: Límites efectivos y agregación en memoria para evitar timeouts.
     """
+    print(f"[get_network_raw_data] INICIO - anio={anio}, dep_raw='{dep_raw}', mun_raw='{mun_raw}'")
+    
     conds = [f"date_extract_y(fecha_de_firma) = {anio}"]
     conds.append("proveedor_adjudicado IS NOT NULL")
     conds.append("nombre_entidad IS NOT NULL")
@@ -59,11 +61,14 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
     if dep_raw:
         safe_dep = dep_raw.replace("'", "''")
         conds.append(f"upper(departamento) = '{safe_dep}'")
+        print(f"[get_network_raw_data] Filtrando por departamento: {safe_dep}")
     if mun_raw:
         safe_mun = mun_raw.replace("'", "''")
         conds.append(f"upper(ciudad) = '{safe_mun}'")
+        print(f"[get_network_raw_data] Filtrando por municipio: {safe_mun}")
         
     where_clause = " AND ".join(conds)
+    print(f"[get_network_raw_data] WHERE clause: {where_clause}")
     
     # OPTIMIZACIÓN: Consultar solo datos necesarios con límite efectivo
     # Usar $limit para limitar filas (no para agrupación)
@@ -79,7 +84,11 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
         r.raise_for_status()
         data = r.json()
         
+        print(f"[get_network_raw_data] Registros obtenidos de API: {len(data)}")
+        
         if not data:
+            if mun_raw:
+                print(f"[get_network_raw_data] ⚠️ No hay datos para municipio '{mun_raw}'")
             return pd.DataFrame()
         
         df = pd.DataFrame(data)
@@ -95,6 +104,8 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
         df_aggregated.columns = ['proveedor_adjudicado', 'nombre_entidad', 
                                  'modalidad_de_contratacion', 'tipo_de_contrato',
                                  'valor_total', 'contratos']
+        
+        print(f"[get_network_raw_data] Registros después de agregación: {len(df_aggregated)}")
         
         return df_aggregated
         
