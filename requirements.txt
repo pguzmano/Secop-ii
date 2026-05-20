@@ -15,3 +15,8 @@ pandas>=2.0.0
 
 # Utilidades opcionales (recomendadas)
 tqdm>=4.66.0         # barra de progreso en ETL
+
+# Dependencias para Análisis de Redes (Grafos)
+networkx>=3.0
+pyvis>=0.3.2
+requests>=2.28.0
