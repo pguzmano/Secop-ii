@@ -116,24 +116,40 @@ class PersistentCache:
     
     def __init__(self, db_path: str = ".cache/api_cache.db"):
         self.db_path = db_path
-        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
-        self._init_db()
+        self.enabled = True
+        try:
+            os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+            self._init_db()
+        except Exception as e:
+            print(f"[CACHE] No se pudo inicializar caché persistente: {e}")
+            print("[CACHE] Continuando sin caché persistente (solo caché de Streamlit)")
+            self.enabled = False
     
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS api_cache (
-                    query_hash TEXT PRIMARY KEY,
-                    query_params TEXT,
-                    result_json TEXT,
-                    timestamp REAL,
-                    ttl_seconds INTEGER
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_timestamp ON api_cache(timestamp)
-            """)
-            conn.commit()
+        try:
+            with sqlite3.connect(self.db_path, timeout=5.0) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS api_cache (
+                        query_hash TEXT PRIMARY KEY,
+                        query_params TEXT,
+                        result_json TEXT,
+                        timestamp REAL,
+                        ttl_seconds INTEGER
+                    )
+                """)
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_timestamp ON api_cache(timestamp)
+                """)
+                conn.commit()
+        except Exception as e:
+            print(f"[CACHE] Error inicializando DB: {e}")
+            # Si falla, intentar eliminar y recrear
+            try:
+                if os.path.exists(self.db_path):
+                    os.remove(self.db_path)
+                    self._init_db()
+            except:
+                pass
     
     def _hash_query(self, params: dict) -> str:
         """Genera hash único para los parámetros de la consulta."""
@@ -142,37 +158,50 @@ class PersistentCache:
     
     def get(self, params: dict) -> Optional[list]:
         """Obtiene resultado del caché si existe y no ha expirado."""
-        query_hash = self._hash_query(params)
-        
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT result_json, timestamp, ttl_seconds FROM api_cache WHERE query_hash = ?",
-                (query_hash,)
-            ).fetchone()
+        if not self.enabled:
+            return None
             
-            if row:
-                result_json, timestamp, ttl = row
-                if time.time() - timestamp < ttl:
-                    return json.loads(result_json)
-                else:
-                    # Expirado: eliminar
-                    conn.execute("DELETE FROM api_cache WHERE query_hash = ?", (query_hash,))
-                    conn.commit()
-        
-        return None
+        try:
+            query_hash = self._hash_query(params)
+            
+            with sqlite3.connect(self.db_path, timeout=5.0) as conn:
+                row = conn.execute(
+                    "SELECT result_json, timestamp, ttl_seconds FROM api_cache WHERE query_hash = ?",
+                    (query_hash,)
+                ).fetchone()
+                
+                if row:
+                    result_json, timestamp, ttl = row
+                    if time.time() - timestamp < ttl:
+                        return json.loads(result_json)
+                    else:
+                        # Expirado: eliminar
+                        conn.execute("DELETE FROM api_cache WHERE query_hash = ?", (query_hash,))
+                        conn.commit()
+            
+            return None
+        except Exception as e:
+            print(f"[CACHE] Error leyendo caché: {e}")
+            return None
     
-    def set(self, params: dict, result: list, ttl_seconds: int = 3600):
+    def set(self, params: dict, result: list, ttl_seconds: int = 300):
         """Almacena resultado en caché."""
-        query_hash = self._hash_query(params)
-        
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """INSERT OR REPLACE INTO api_cache 
-                   (query_hash, query_params, result_json, timestamp, ttl_seconds)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (query_hash, json.dumps(params), json.dumps(result), time.time(), ttl_seconds)
-            )
-            conn.commit()
+        if not self.enabled:
+            return
+            
+        try:
+            query_hash = self._hash_query(params)
+            
+            with sqlite3.connect(self.db_path, timeout=5.0) as conn:
+                conn.execute(
+                    """INSERT OR REPLACE INTO api_cache 
+                       (query_hash, query_params, result_json, timestamp, ttl_seconds)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (query_hash, json.dumps(params), json.dumps(result), time.time(), ttl_seconds)
+                )
+                conn.commit()
+        except Exception as e:
+            print(f"[CACHE] Error escribiendo caché: {e}")
 
 # Instancia global de caché
 _cache = PersistentCache()
@@ -210,13 +239,19 @@ def soql_get(params: dict) -> pd.DataFrame:
     """
     
     # 1. Intentar obtener del caché
-    cached = _cache.get(params)
-    if cached is not None:
-        return pd.DataFrame(cached)
+    try:
+        cached = _cache.get(params)
+        if cached is not None:
+            print(f"[soql_get] ✅ Datos obtenidos del caché")
+            return pd.DataFrame(cached)
+    except Exception as e:
+        print(f"[soql_get] ⚠️ Error leyendo caché: {e}")
     
     # 2. Consultar API con reintentos
     max_retries = 2
     timeout = API_TIMEOUT
+    
+    print(f"[soql_get] 📡 Consultando API (timeout: {timeout}s)...")
     
     for attempt in range(max_retries + 1):
         try:
@@ -229,13 +264,19 @@ def soql_get(params: dict) -> pd.DataFrame:
             r.raise_for_status()
             data = r.json()
             
-            # 3. Cachear resultado (TTL de 1 hora)
+            print(f"[soql_get] ✅ Respuesta recibida: {len(data)} registros")
+            
+            # 3. Cachear resultado (TTL de 5 minutos)
             if data:
-                _cache.set(params, data, ttl_seconds=3600)
+                try:
+                    _cache.set(params, data, ttl_seconds=300)
+                except Exception as e:
+                    print(f"[soql_get] ⚠️ Error guardando en caché: {e}")
             
             return pd.DataFrame(data) if data else pd.DataFrame()
         
         except requests.Timeout:
+            print(f"[soql_get] ⏱️ Timeout en intento {attempt + 1}/{max_retries + 1}")
             if attempt < max_retries:
                 timeout = int(timeout * 1.5)
                 time.sleep(0.5)
@@ -245,11 +286,12 @@ def soql_get(params: dict) -> pd.DataFrame:
                 return pd.DataFrame()
         
         except Exception as e:
+            print(f"[soql_get] ❌ Error en intento {attempt + 1}/{max_retries + 1}: {e}")
             if attempt < max_retries:
                 time.sleep(0.5)
                 continue
             else:
-                st.error(f"Error consultando API: {e}")
+                st.error(f"❌ Error consultando API: {e}")
                 return pd.DataFrame()
     
     return pd.DataFrame()
@@ -258,25 +300,32 @@ def soql_get(params: dict) -> pd.DataFrame:
 @st.cache_data(ttl=300, show_spinner="Consultando años disponibles...")
 @monitor_latency("get_anios")
 def get_anios() -> list[int]:
-    df = soql_get({
-        "$select": "date_extract_y(fecha_de_firma) AS anio, COUNT(*) AS n",
-        "$group":  "date_extract_y(fecha_de_firma)",
-        "$where":  "fecha_de_firma IS NOT NULL",
-        "$order":  "anio DESC",
-        "$limit":  "50",
-    })
-    if df.empty or "anio" not in df.columns:
+    try:
+        df = soql_get({
+            "$select": "date_extract_y(fecha_de_firma) AS anio, COUNT(*) AS n",
+            "$group":  "date_extract_y(fecha_de_firma)",
+            "$where":  "fecha_de_firma IS NOT NULL",
+            "$order":  "anio DESC",
+            "$limit":  "50",
+        })
+        if df.empty or "anio" not in df.columns:
+            print("[get_anios] DataFrame vacío o sin columna 'anio', usando años por defecto")
+            return [2026, 2025, 2024, 2023, 2022, 2021, 2020]
+        anios = sorted([int(float(x)) for x in df["anio"].dropna().tolist()], reverse=True)
+        # Filtrar años con datos reales (>=5 contratos)
+        if "n" in df.columns:
+            df["n"]    = pd.to_numeric(df["n"], errors="coerce").fillna(0)
+            df["anio"] = pd.to_numeric(df["anio"], errors="coerce")
+            anios = sorted(
+                [int(a) for a in df.loc[df["n"] >= 5, "anio"].tolist()],
+                reverse=True
+            )
+        print(f"[get_anios] Años obtenidos: {anios}")
+        return anios if anios else [2026, 2025, 2024, 2023]
+    except Exception as e:
+        print(f"[get_anios] Error: {e}")
+        st.error(f"⚠️ Error obteniendo años: {e}")
         return [2026, 2025, 2024, 2023, 2022, 2021, 2020]
-    anios = sorted([int(float(x)) for x in df["anio"].dropna().tolist()], reverse=True)
-    # Filtrar años con datos reales (>=100 contratos)
-    if "n" in df.columns:
-        df["n"]    = pd.to_numeric(df["n"], errors="coerce").fillna(0)
-        df["anio"] = pd.to_numeric(df["anio"], errors="coerce")
-        anios = sorted(
-            [int(a) for a in df.loc[df["n"] >= 5, "anio"].tolist()],
-            reverse=True
-        )
-    return anios if anios else [2026, 2025, 2024, 2023]
 
 
 @st.cache_data(ttl=300, show_spinner="Cargando departamentos...")
