@@ -272,46 +272,61 @@ def generate_alerts(prov_df, edges_df):
     try:
         alertas = []
         
-        # Regla 1: Fragmentación Alta (Entidad)
-        # Ya manejado en parte en proveedores, busquemos proveedores anómalos
+        # Regla 1: Concentración Directa y Red Transversal
         for _, p in prov_df.head(100).iterrows():
             if p['pct_directa'] > 0.85 and p['contratos_totales'] >= 4:
                 alertas.append({
-                    "Nivel": "🔴 RIESGO CRÍTICO", "Actor": p['proveedor'], "Tipo": "Concentración Directa",
-                    "Mensaje": f"Proveedor con {p['pct_directa']*100:.1f}% de contratación directa y score {p['score_riesgo']}."
+                    "Nivel": "🔴 RIESGO CRÍTICO", "Actor": p['proveedor'], "Tipo": "Monopolio Directo",
+                    "Mensaje": f"Concentración anómala: {p['pct_directa']*100:.1f}% adjudicación directa en {p['contratos_totales']} procesos."
                 })
             if p['entidades_distintas'] >= 5:
                 alertas.append({
-                    "Nivel": "🟡 ALERTA ESTRUCTURAL", "Actor": p['proveedor'], "Tipo": "Red Transversal",
-                    "Mensaje": f"Opera con {p['entidades_distintas']} entidades distintas en el territorio."
+                    "Nivel": "🟡 RED ACTIVA", "Actor": p['proveedor'], "Tipo": "Red Transversal",
+                    "Mensaje": f"Alta penetración: Opera simultáneamente con {p['entidades_distintas']} entidades distintas."
                 })
                 
-        # Regla 2: Repetición Sospechosa
-        # Agrupar edges para ver repetición pura entre p y e
-        rep = edges_df.groupby(['proveedor', 'entidad'])['contratos'].sum().reset_index()
-        for _, r in rep[rep['contratos'] >= 10].iterrows():
+        # Regla 2: Índice de Favoritismo y Carrusel (Repetición Sospechosa)
+        rep = edges_df.groupby(['proveedor', 'entidad']).agg(
+            contratos=('contratos', 'sum'),
+            valor_total=('valor_total', 'sum')
+        ).reset_index()
+        
+        for _, r in rep[rep['contratos'] >= 8].iterrows():
             alertas.append({
-                "Nivel": "🔴 ALTO RIESGO", "Actor": f"{r['proveedor']} ↔ {r['entidad']}", "Tipo": "Fragmentación/Carrusel",
-                "Mensaje": f"Relación altamente repetitiva con {r['contratos']} contratos directos."
+                "Nivel": "🔴 ALERTA ROJA", "Actor": f"{r['proveedor']} ↔ {r['entidad']}", "Tipo": "Favoritismo Extremo",
+                "Mensaje": f"Relación altamente repetitiva ({r['contratos']} contratos consecutivos)."
             })
             
+        # Regla 3: Monto Fraccionado (Evasión de Licitación)
+        # Buscar proveedores con múltiples contratos pequeños con la misma entidad que suman un valor muy alto
+        for _, r in rep[(rep['contratos'] >= 4) & (rep['valor_total'] > 1e8)].iterrows():
+            avg_val = r['valor_total'] / r['contratos']
+            if avg_val < 5e7: # Muchos contratos de poco valor que suman mucho
+                alertas.append({
+                    "Nivel": "🟠 RIESGO ESTRUCTURAL", "Actor": f"{r['proveedor']}", "Tipo": "Posible Fraccionamiento",
+                    "Mensaje": f"Múltiples contratos pequeños con {r['entidad']} que totalizan {r['valor_total']:,.0f}."
+                })
+
         return pd.DataFrame(alertas) if alertas else pd.DataFrame(columns=["Nivel", "Actor", "Tipo", "Mensaje"])
     except Exception as e:
         st.error(f"❌ Error al generar alertas: {e}")
         return pd.DataFrame(columns=["Nivel", "Actor", "Tipo", "Mensaje"])
 
 @monitor_latency("create_pyvis_html")
-def create_pyvis_html(G):
-    """Genera HTML de Pyvis con soporte a fallbacks.
-    OPTIMIZADO: Usa batch operations para agregar nodos y aristas.
-    """
+def create_pyvis_html(G, ego_node=None):
+    """Genera HTML de Pyvis. Grafo radial si hay ego_node, ForceAtlas si no."""
     try:
         net = Network(height="650px", width="100%", bgcolor=C['bg'], font_color=C['text'], select_menu=True, cdn_resources='remote')
     except Exception as e:
         st.error(f"Error al crear red Pyvis: {e}")
         net = Network(height="650px", width="100%", bgcolor=C['bg'], font_color=C['text'], select_menu=True)
         
-    net.force_atlas_2based(gravity=-60, central_gravity=0.01, spring_length=120, spring_strength=0.05, damping=0.5)
+    if ego_node and G.has_node(ego_node):
+        # Modo Radial: Física especial para órbitas alrededor del nodo central
+        net.force_atlas_2based(gravity=-40, central_gravity=0.03, spring_length=150, spring_strength=0.08, damping=0.8)
+    else:
+        # Modo Libre
+        net.force_atlas_2based(gravity=-60, central_gravity=0.01, spring_length=120, spring_strength=0.05, damping=0.5)
     
     # OPTIMIZACIÓN: Limitar número de nodos para render rápido
     # Si hay más de 100 nodos, solo mostrar los más relevantes
@@ -349,8 +364,21 @@ def create_pyvis_html(G):
         })
     
     for node in nodes_data:
-        net.add_node(node['id'], label=node['label'], title=node['title'], 
-                    color=node['color'], shape=node['shape'], size=node['size'])
+        # Si es el nodo ego, anclarlo al centro para grafo radial
+        is_ego = (ego_node and node['id'] == ego_node)
+        
+        # Color rojo peligroso si es nodo ancla, verde neón para entidades ancla
+        if is_ego:
+            node['color'] = "#F43F5E" if node['shape'] == 'dot' else "#10B981"
+            node['size'] = 35 # Extra grande
+            
+        if is_ego:
+            net.add_node(node['id'], label=node['label'], title=node['title'], 
+                        color=node['color'], shape=node['shape'], size=node['size'],
+                        fixed=True, x=0, y=0)
+        else:
+            net.add_node(node['id'], label=node['label'], title=node['title'], 
+                        color=node['color'], shape=node['shape'], size=node['size'])
     
     # Agregar aristas en batch
     if len(nodes) < max_nodes:
@@ -492,7 +520,11 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
     </div>
     """, unsafe_allow_html=True)
     
-    html_graph = create_pyvis_html(G)
+    # Generar Visualización HTML
+    with st.spinner("Mapeando relaciones..."):
+        # Determinar el actor si no es el valor por defecto
+        ego_actual = nodo_seleccionado if nodo_seleccionado and "Mostrar Red Completa" not in nodo_seleccionado else None
+        html_graph = create_pyvis_html(G, ego_node=ego_actual)
     st.markdown(f"<div style='border:1px solid {C['border']};border-radius:12px;overflow:hidden;'>", unsafe_allow_html=True)
     components.html(html_graph, height=650, scrolling=False)
     st.markdown("</div><br>", unsafe_allow_html=True)
@@ -501,12 +533,34 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
     col_a, col_b = st.columns([1, 1.5])
     
     with col_a:
-        st.markdown(f"<div style='font-size:.7rem;font-weight:700;color:{C['red']};letter-spacing:1px;margin-bottom:10px;'>🚨 ALERTAS AUTOMÁTICAS</div>", unsafe_allow_html=True)
+        st.markdown("<h3 style='font-size:1.1rem;font-weight:700;color:#fff;margin:30px 0 15px;'>🚨 Detección de Anomalías (Heurística Avanzada)</h3>", unsafe_allow_html=True)
         df_alertas = generate_alerts(prov_df, edges_df)
+    
         if not df_alertas.empty:
-            st.dataframe(df_alertas, use_container_width=True, hide_index=True)
+            # Habilitamos on_select para poder filtrar el grafo desde las alertas
+            event_alertas = st.dataframe(
+                df_alertas, 
+                use_container_width=True, 
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="tabla_alertas_interactiva"
+            )
+            
+            if event_alertas and event_alertas.selection and event_alertas.selection.rows:
+                idx = event_alertas.selection.rows[0]
+                actor_alerta = df_alertas.iloc[idx]["Actor"]
+                # Si el actor tiene ↔ significa que es una relación (Proveedor ↔ Entidad)
+                if "↔" in actor_alerta:
+                    actor_alerta = actor_alerta.split("↔")[0].strip()
+                
+                if st.session_state.get("actor_seleccionado") != actor_alerta:
+                    st.session_state["actor_seleccionado"] = actor_alerta
+                    st.session_state["select_actor_raw"] = actor_alerta
+                    st.session_state["entity_selector_kpi"] = actor_alerta
+                    st.rerun()
         else:
-            st.success("No se detectaron riesgos severos.")
+            st.success("No se detectaron patrones anómalos críticos en esta red.", icon="✅")
             
     with col_b:
         st.markdown(f"<div style='font-size:.7rem;font-weight:700;color:{C['purple']};letter-spacing:1px;margin-bottom:10px;'>📊 TABLA FINAL DE RIESGO (FASE 9)</div>", unsafe_allow_html=True)

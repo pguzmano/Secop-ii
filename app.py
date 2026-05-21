@@ -275,21 +275,19 @@ def get_top_entidades_dep(anio: int, dep_raw: str, n: int = 15) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=86400, show_spinner=False)  # 24h para nivel nacional
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_kpis_nacional(anio: int) -> dict:
-    """KPIs nacionales — TTL muy largo, solo se recalcula 1 vez por dia"""
-    df = soql_get({
-        "$select": "SUM(valor_del_contrato) AS total_valor, COUNT(*) AS total_contratos",
-        "$where": f"date_extract_y(fecha_de_firma) = {anio}",
-        "$limit": "1",
-    })
-    if df.empty:
+    """KPIs nacionales instantáneos: Reutiliza la consulta departamental agrupada 
+    en lugar de escanear 10M de filas sueltas en Socrata.
+    """
+    df_deps = get_departamentos(anio)
+    if df_deps.empty:
         return {"total_valor": 0, "total_contratos": 0, "total_entidades": 0}
-    row = df.iloc[0]
+    
     return {
-        "total_valor": float(row.get("total_valor", 0) or 0),
-        "total_contratos": int(float(row.get("total_contratos", 0) or 0)),
-        "total_entidades": 0,
+        "total_valor": float(df_deps["valor"].sum()),
+        "total_contratos": int(df_deps["contratos"].sum()),
+        "total_entidades": 0, # Socrata no permite distinct nacional rápido
     }
 
 
@@ -645,12 +643,26 @@ def render_tabla_entidades(anio: int, mun_raw: str, mun_norm: str):
         df_disp["contratos_fmt"]   = df_disp["contratos"].apply(fmt_n)
         df_disp = df_disp[["nombre_entidad", "contratos_fmt", "presupuesto_fmt"]]
         df_disp.columns = ["Entidad", "Contratos", "Presupuesto"]
-        st.write(
-            df_disp.style
-            .set_properties(**{"background-color": C["card"], "color": C["text"], "border": f"1px solid {C['border']}", "font-size": ".79rem"})
-            .set_table_styles([{"selector": "th", "props": [("background-color", C["border"]), ("color", "#fff"), ("font-size", ".73rem"), ("padding", "8px 10px")]}])
-            .to_html(), unsafe_allow_html=True
+        # Tabla interactiva con on_select
+        event = st.dataframe(
+            df_disp,
+            use_container_width=True, 
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="tabla_entidades_local"
         )
+        
+        # Interceptar click y actualizar actor seleccionado
+        if event and event.selection and event.selection.rows:
+            idx = event.selection.rows[0]
+            entidad_seleccionada = df_disp.iloc[idx]["Entidad"]
+            # Actualizar el session state si es diferente
+            if st.session_state.get("actor_seleccionado") != entidad_seleccionada:
+                st.session_state["actor_seleccionado"] = entidad_seleccionada
+                st.session_state["select_actor_raw"] = entidad_seleccionada
+                st.session_state["entity_selector_kpi"] = entidad_seleccionada
+                st.rerun()
 
     with col_b:
         df_plot = df.head(10).copy()
