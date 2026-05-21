@@ -195,14 +195,13 @@ def process_metrics_and_risk(df_raw: pd.DataFrame):
     con.close()
     return edges_df, prov_df, ent_df
 
-@st.cache_data(show_spinner=False, ttl=300, hash_funcs={pd.DataFrame: lambda df: hash(tuple(df.values.tobytes()))})
+@st.cache_data(show_spinner=False, ttl=300)
 @monitor_latency("build_base_graph")
-def build_base_graph(edges_df, prov_df, ent_df):
+def build_base_graph(edges_df, prov_df, ent_df, _cache_key: tuple = ()):
     """Construye y cachea la red completa una sola vez por municipio.
-    OPTIMIZADO: Usa operaciones vectorizadas para mejor rendimiento.
-    CORREGIDO: Usa cache_data con hash explícito para invalidar correctamente cuando cambian los datos.
+    OPTIMIZADO: Usa cache_key=(anio, dep, mun) para invalidar correctamente al cambiar municipio.
     """
-    print(f"[build_base_graph] Construyendo grafo con {len(edges_df)} aristas")
+    print(f"[build_base_graph] Construyendo grafo con {len(edges_df)} aristas | cache_key={_cache_key}")
     
     G = nx.Graph()
     
@@ -212,11 +211,9 @@ def build_base_graph(edges_df, prov_df, ent_df):
     max_val = edges_df['valor_total'].max() if not edges_df.empty else 1
     if max_val == 0: max_val = 1
     
-    # Pre-calcular todos los nodos de una vez (vectorizado)
     proveedores_unicos = edges_df['proveedor'].unique()
     entidades_unicas = edges_df['entidad'].unique()
     
-    # Agregar nodos de proveedores en batch
     for p in proveedores_unicos:
         p_data = prov_dict.get(p, {})
         nivel = p_data.get('nivel_riesgo', '🟡 MEDIO')
@@ -229,7 +226,6 @@ def build_base_graph(edges_df, prov_df, ent_df):
         G.add_node(p, tipo="proveedor", label=p, color=color_p, size=size_p,
                    title=f"PROVEEDOR<br><b>{p}</b><br>Riesgo: {nivel} (Score: {p_data.get('score_riesgo',0)})<br>Contratos: {p_data.get('contratos_totales',0)}<br>Entidades: {p_data.get('entidades_distintas',0)}<br>Directa: {p_data.get('pct_directa',0)*100:.1f}%")
     
-    # Agregar nodos de entidades en batch
     for e in entidades_unicas:
         e_data = ent_dict.get(e, {})
         color_e = C['blue']
@@ -238,21 +234,16 @@ def build_base_graph(edges_df, prov_df, ent_df):
         G.add_node(e, tipo="entidad", label=e, color=color_e, shape="square", size=size_e,
                    title=f"ENTIDAD<br><b>{e}</b><br>Contratos: {e_data.get('contratos_totales',0)}<br>Proveedores: {e_data.get('num_proveedores',0)}<br>Total: {format_b(e_data.get('valor_total',0))}")
     
-    # Agregar aristas usando itertuples (más rápido que iterrows)
     for row in edges_df.itertuples(index=False):
         p = row.proveedor
         e = row.entidad
         mod = row.modalidad
             
-        # Color por modalidad
         if "DIRECTA" in mod: color_edge = C['red']
         elif "LICITACI" in mod: color_edge = C['blue']
         else: color_edge = C['gray']
         
-        # Grosor por valor_total (vectorizado)
         width = max(1, min((row.valor_total / max_val) * 15, 15))
-        
-        # Tooltip
         t_title = f"{p} ↔ {e}<br>Modalidad: {mod}<br>Tipo: {row.tipo}<br>Contratos: {row.contratos}<br>Valor: {format_b(row.valor_total)}"
         
         if G.has_edge(p, e):
@@ -263,10 +254,10 @@ def build_base_graph(edges_df, prov_df, ent_df):
             
     return G
 
-def build_graph(edges_df, prov_df, ent_df, ego_node=None):
-    """FASE 5: Grafo Mejorado (Instantáneo por Caché)"""
+def build_graph(edges_df, prov_df, ent_df, ego_node=None, cache_key: tuple = ()):
+    """FASE 5: Grafo Mejorado — se invalida correctamente por municipio via cache_key."""
     try:
-        G_base = build_base_graph(edges_df, prov_df, ent_df)
+        G_base = build_base_graph(edges_df, prov_df, ent_df, _cache_key=cache_key)
         
         if ego_node and G_base.has_node(ego_node):
             return nx.ego_graph(G_base, ego_node, radius=1)
@@ -477,8 +468,10 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
     ego_filter = None if nodo_seleccionado == "🌍 Mostrar Red Completa" else nodo_seleccionado
     
     # FASE 3: Construcción de grafo
+    # cache_key asegura que al cambiar municipio se regenere el grafo correctamente
+    cache_key = (anio, dep_raw, mun_raw)
     with st.spinner("Construyendo red de relaciones..."):
-        G = build_graph(edges_df, prov_df, ent_df, ego_node=ego_filter)
+        G = build_graph(edges_df, prov_df, ent_df, ego_node=ego_filter, cache_key=cache_key)
     
     if G is None or len(G.nodes) == 0:
         st.warning("El grafo resultante está vacío para este filtro.")
