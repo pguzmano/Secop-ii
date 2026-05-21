@@ -316,10 +316,10 @@ def generate_alerts(prov_df, edges_df):
 def create_pyvis_html(G, ego_node=None):
     """Genera HTML de Pyvis. Grafo radial si hay ego_node, ForceAtlas si no."""
     try:
-        net = Network(height="650px", width="100%", bgcolor=C['bg'], font_color=C['text'], select_menu=True, cdn_resources='remote')
+        net = Network(height="650px", width="100%", bgcolor=C['bg'], font_color=C['text'], select_menu=False, cdn_resources='remote')
     except Exception as e:
         st.error(f"Error al crear red Pyvis: {e}")
-        net = Network(height="650px", width="100%", bgcolor=C['bg'], font_color=C['text'], select_menu=True)
+        net = Network(height="650px", width="100%", bgcolor=C['bg'], font_color=C['text'], select_menu=False)
         
     if ego_node and G.has_node(ego_node):
         # Modo Radial: Física especial para órbitas alrededor del nodo central
