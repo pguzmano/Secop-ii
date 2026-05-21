@@ -46,7 +46,7 @@ def monitor_latency(func_name: str):
         return wrapper
     return decorator
 
-@st.cache_data(ttl=300, show_spinner="Extraeción API (Fase 1)...")
+@st.cache_data(ttl=60, show_spinner=False)  # TTL reducido a 60s
 @monitor_latency("get_network_raw_data")
 def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.DataFrame:
     """FASE 1: Consulta Base Enriquecida Socrata
@@ -76,7 +76,7 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
         "$select": "proveedor_adjudicado, nombre_entidad, modalidad_de_contratacion, tipo_de_contrato, valor_del_contrato",
         "$where": where_clause,
         "$order": "valor_del_contrato DESC",
-        "$limit": "500"  # Limitar a 500 filas (no 1500)
+        "$limit": "300"  # Reducido de 500 a 300 para mejor performance en producción
     }
     
     try:
@@ -116,7 +116,7 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
         st.error(f"Error consultando API de red: {e}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=300, show_spinner="Procesando Métricas y Riesgo (Fase 2-4)...")
+@st.cache_data(ttl=60, show_spinner=False)  # TTL reducido
 @monitor_latency("process_metrics_and_risk")
 def process_metrics_and_risk(df_raw: pd.DataFrame):
     """FASE 2, 3 y 4: Métricas Clave y Score de Riesgo usando DuckDB
@@ -195,7 +195,7 @@ def process_metrics_and_risk(df_raw: pd.DataFrame):
     con.close()
     return edges_df, prov_df, ent_df
 
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=60)  # TTL reducido a 60s
 @monitor_latency("build_base_graph")
 def build_base_graph(edges_df, prov_df, ent_df, _cache_key: tuple = ()):
     """Construye y cachea la red completa una sola vez por municipio.
@@ -417,21 +417,19 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
         </div>
         """, unsafe_allow_html=True)
     
-    # FASE 1: Consulta API
-    with st.spinner("Consultando datos contractuales..."):
-        df_raw = get_network_raw_data(anio, dep_raw, mun_raw)
+    # FASE 1: Consulta API (con spinner solo si toma >1s)
+    df_raw = get_network_raw_data(anio, dep_raw, mun_raw)
     
     if df_raw.empty:
         st.warning("⚠️ No hay suficientes datos contractuales para construir una red.")
         return
     
-    # FASE 2: Procesamiento
-    with st.spinner("Procesando métricas de riesgo..."):
-        try:
-            edges_df, prov_df, ent_df = process_metrics_and_risk(df_raw)
-        except Exception as e:
-            st.error(f"❌ Error al procesar métricas: {e}")
-            return
+    # FASE 2: Procesamiento (sin spinner, es rápido con caché)
+    try:
+        edges_df, prov_df, ent_df = process_metrics_and_risk(df_raw)
+    except Exception as e:
+        st.error(f"❌ Error al procesar métricas: {e}")
+        return
     
     if edges_df.empty:
         st.warning("⚠️ No hay suficientes datos para construir la red después del procesamiento.")
@@ -467,11 +465,10 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
     
     ego_filter = None if nodo_seleccionado == "🌍 Mostrar Red Completa" else nodo_seleccionado
     
-    # FASE 3: Construcción de grafo
+    # FASE 3: Construcción de grafo (sin spinner, es rápido con caché)
     # cache_key asegura que al cambiar municipio se regenere el grafo correctamente
     cache_key = (anio, dep_raw, mun_raw)
-    with st.spinner("Construyendo red de relaciones..."):
-        G = build_graph(edges_df, prov_df, ent_df, ego_node=ego_filter, cache_key=cache_key)
+    G = build_graph(edges_df, prov_df, ent_df, ego_node=ego_filter, cache_key=cache_key)
     
     if G is None or len(G.nodes) == 0:
         st.warning("El grafo resultante está vacío para este filtro.")
