@@ -390,12 +390,13 @@ def reset():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RENDERIZADO KPIs
+# RENDERIZADO KPIs + SELECTOR DE ENTIDAD INTERACTIVO
 # ─────────────────────────────────────────────────────────────────────────────
 def render_kpis(anio, dep, mun, actor_filter=""):
     spinner_ctx = st.spinner("Calculando KPIs...") if not dep and not mun and not actor_filter else contextlib.nullcontext()
     with spinner_ctx:
         k = get_kpis(anio, dep, mun, actor_filter)
+    
     items = [
         ("💰", "Presupuesto Total",  fmt_b(k["total_valor"]),      "Valor adjudicado", C["blue"]),
         ("📄", "Total Contratos",    fmt_n(k["total_contratos"]),   "Procesos firmados", C["green"]),
@@ -412,6 +413,57 @@ def render_kpis(anio, dep, mun, actor_filter=""):
                 <div class="kpi-sub">{sub}</div>
                 <div class="kpi-bar" style="background:linear-gradient(90deg,{color}33,{color});"></div>
             </div>""", unsafe_allow_html=True)
+
+
+def render_entity_selector(anio: int, mun_raw: str):
+    """Selector interactivo de entidad que conecta KPIs ↔ Grafo.
+    Solo se muestra cuando hay un municipio seleccionado.
+    """
+    if not mun_raw:
+        return
+
+    df_ents = get_entidades(anio, mun_raw)
+    if df_ents.empty:
+        return
+
+    # Construir opciones: entidades + proveedores del grafo
+    opciones_entidades = ["🌍 Todas las Entidades"] + df_ents["nombre_entidad"].tolist()
+
+    actor_actual = st.session_state.get("actor_seleccionado", "")
+    idx = 0
+    if actor_actual in opciones_entidades:
+        idx = opciones_entidades.index(actor_actual)
+
+    st.markdown(f"""
+    <div style='background:rgba(167,139,250,.07);border:1px solid rgba(167,139,250,.2);
+                border-radius:10px;padding:12px 16px;margin:10px 0 4px;'>
+        <div style='font-size:.63rem;font-weight:700;letter-spacing:1px;color:{C['purple']};
+                    text-transform:uppercase;margin-bottom:6px;'>🏛️ Filtrar por Entidad → Actualiza KPIs y Grafo</div>
+    """, unsafe_allow_html=True)
+
+    def _on_entity_change():
+        val = st.session_state.get("entity_selector_kpi", "🌍 Todas las Entidades")
+        st.session_state["actor_seleccionado"] = "" if val == "🌍 Todas las Entidades" else val
+        # Sincronizar con el selector del grafo
+        st.session_state["select_actor_raw"] = val
+
+    st.selectbox(
+        label="Selecciona una entidad para filtrar:",
+        options=opciones_entidades,
+        index=idx,
+        key="entity_selector_kpi",
+        on_change=_on_entity_change,
+        label_visibility="collapsed",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Boton limpiar filtro
+    if actor_actual:
+        if st.button("❌ Quitar filtro de entidad", key="clear_entity_filter", use_container_width=True):
+            st.session_state["actor_seleccionado"] = ""
+            st.session_state["select_actor_raw"] = "🌍 Mostrar Red Completa"
+            st.session_state["entity_selector_kpi"] = "🌍 Todas las Entidades"
+            st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -794,11 +846,23 @@ def main():
 
     render_breadcrumb(dep_norm, mun_norm, anio)
 
-    # ── KPIs (usando raw para WHERE) globales a todas las pestañas ────────────
+    # ── KPIs + Selector de Entidad Interactivo ────────────────────────────────
     actor = st.session_state.get("actor_seleccionado", "")
     if actor:
-        st.markdown(f"<div style='background:rgba(244, 63, 94, .1); color:#F43F5E; padding:8px; border-radius:8px; font-weight:700; margin-bottom:10px; font-size:0.8rem;'>🔎 Filtrando KPIs por Actor: {actor}</div>", unsafe_allow_html=True)
+        col_badge, col_clear = st.columns([5, 1])
+        with col_badge:
+            st.markdown(
+                f"<div style='background:rgba(244,63,94,.1);color:#F43F5E;padding:8px 12px;"
+                f"border-radius:8px;font-weight:700;font-size:0.8rem;border:1px solid rgba(244,63,94,.3);'>"
+                f"🔎 Filtrando por: <b>{actor}</b></div>",
+                unsafe_allow_html=True
+            )
     render_kpis(anio, dep_raw, mun_raw, actor)
+    
+    # Selector de entidad (solo visible con municipio seleccionado)
+    if mun_raw:
+        render_entity_selector(anio, mun_raw)
+    
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── Tabs de Navegación ────────────────────────────────────────────────────
