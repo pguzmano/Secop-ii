@@ -275,19 +275,19 @@ def get_top_entidades_dep(anio: int, dep_raw: str, n: int = 15) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_kpis_nacional(anio: int) -> dict:
     """KPIs nacionales instantáneos: Reutiliza la consulta departamental agrupada 
     en lugar de escanear 10M de filas sueltas en Socrata.
     """
     df_deps = get_departamentos(anio)
     if df_deps.empty:
-        return {"total_valor": 0, "total_contratos": 0, "total_entidades": 0}
+        return {"total_valor": 0, "total_contratos": 0, "total_entidades": "—"}
     
     return {
         "total_valor": float(df_deps["valor"].sum()),
         "total_contratos": int(df_deps["contratos"].sum()),
-        "total_entidades": 0, # Socrata no permite distinct nacional rápido
+        "total_entidades": "—", # Socrata no permite distinct nacional rápido
     }
 
 
