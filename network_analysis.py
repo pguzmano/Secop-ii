@@ -499,11 +499,11 @@ def create_pyvis_html(G, ego_node=None, critical_nodes: set = None):
                       font_color=C['text'], select_menu=False)
 
     if ego_node and G.has_node(ego_node):
-        net.force_atlas_2based(gravity=-45, central_gravity=0.04,
-                               spring_length=160, spring_strength=0.09, damping=0.85)
+        net.repulsion(node_distance=250, central_gravity=0.04,
+                      spring_length=300, spring_strength=0.04, damping=0.09)
     else:
-        net.force_atlas_2based(gravity=-70, central_gravity=0.01,
-                               spring_length=130, spring_strength=0.05, damping=0.5)
+        net.repulsion(node_distance=200, central_gravity=0.015,
+                      spring_length=250, spring_strength=0.03, damping=0.09)
 
     # Limitar a 120 nodos más relevantes (por tamaño = valor)
     max_nodes = 120
@@ -1155,8 +1155,8 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                 # Construcción del Grafo Interactivo con PyVis
                 st.markdown("<br><div style='font-size:0.75rem; font-weight:700; color:#fff; text-transform:uppercase;'>🕸️ Grafo de Coincidencia de Estructura de Control e Impacto Económico</div>", unsafe_allow_html=True)
                 
-                net = Network(height="360px", width="100%", bgcolor="#0D1421", font_color="#F1F5F9")
-                net.barnes_hut(gravity=-1500, central_gravity=0.4, spring_length=95)
+                net = Network(height="450px", width="100%", bgcolor="#0D1421", font_color="#F1F5F9")
+                net.repulsion(node_distance=180, central_gravity=0.05, spring_length=220, spring_strength=0.05, damping=0.09)
                 
                 id_raiz = metadata["nit_rep"] if metadata["nit_rep"] != "N/A" else metadata["nit_proveedor"]
                 lbl_origen = f"REP: {metadata['rep_legal'][:15]}..." if metadata["nit_rep"] != "N/A" else "CONTRATISTA"
