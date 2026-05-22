@@ -896,7 +896,7 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
     st.markdown("</div><br>", unsafe_allow_html=True)
 
     # ── Tabla Maestra Forense + Expediente Dinámico ───────────────────────
-    render_forensic_master_table(prov_df, anio, dep_raw, mun_raw)
+    render_forensic_master_table(prov_df, anio, dep_raw, mun_raw, edges_df=edges_df)
 
 
 # =============================================================================
@@ -931,7 +931,7 @@ def soql_focal(params: dict) -> pd.DataFrame:
 
 
 def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
-                                  dep_raw: str, mun_raw: str):
+                                  dep_raw: str, mun_raw: str, edges_df: pd.DataFrame = None):
     """Tabla Maestra Unificada + Expediente Dinamico:
        Rep. Legal -> Malla Corporativa -> Grafo focalizado -> Auditoria financiera."""
 
@@ -1035,28 +1035,53 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     else:
                         where_malla = f"nit_proveedor = '{nit_prov_central}'"
                         where_contratos = f"nit_proveedor = '{nit_prov_central}'"
-                else:
-                    # FALLBACK: Si no hay NIT, buscamos estrictamente por el nombre del proveedor
-                    safe_prov_raw = str(proveedor_actual).replace("'", "''").upper()
-                    where_malla = f"upper(proveedor_adjudicado) = '{safe_prov_raw}'"
-                    where_contratos = f"upper(proveedor_adjudicado) = '{safe_prov_raw}'"
 
-                with st.spinner("Construyendo matriz relacional y buscando transacciones..."):
-                    # Consulta B: Malla relacional
-                    st.session_state["forensic_malla_data"] = soql_focal({
-                        "$select": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
-                        "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
-                        "$group": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad",
-                        "$limit": "250"
-                    })
-                    
-                    # Consulta C: Historial financiero detallado
-                    st.session_state["forensic_contratos_data"] = soql_focal({
-                        "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio, fecha_fin, estado_del_contrato, tipo_de_contrato, modalidad_de_contratacion, valor_pago_adelantado, valor_amortizado, valor_pendiente",
-                        "$where": f"date_extract_y(fecha_de_firma) = {anio} AND {where_contratos}",
-                        "$order": "valor_del_contrato DESC",
-                        "$limit": "100"
-                    })
+                    with st.spinner("Construyendo matriz relacional y buscando transacciones..."):
+                        # Consulta B: Malla relacional
+                        st.session_state["forensic_malla_data"] = soql_focal({
+                            "$select": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
+                            "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
+                            "$group": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad",
+                            "$limit": "250"
+                        })
+                        
+                        # Consulta C: Historial financiero detallado
+                        st.session_state["forensic_contratos_data"] = soql_focal({
+                            "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio, fecha_fin, estado_del_contrato, tipo_de_contrato, modalidad_de_contratacion, valor_pago_adelantado, valor_amortizado, valor_pendiente",
+                            "$where": f"date_extract_y(fecha_de_firma) = {anio} AND {where_contratos}",
+                            "$order": "valor_del_contrato DESC",
+                            "$limit": "100"
+                        })
+                else:
+                    # FALLBACK SUPREMO: Si falla Socrata, extraemos la matriz de relaciones de la memoria local (edges_df)
+                    with st.spinner("Construyendo matriz desde registros indexados localmente..."):
+                        if edges_df is not None and not edges_df.empty:
+                            # Filtrar relaciones de este proveedor desde edges_df
+                            df_malla_local = edges_df[edges_df["proveedor_adjudicado"] == proveedor_actual].copy()
+                            
+                            # Mapear columnas para simular respuesta de Socrata (Malla)
+                            df_malla_local["nit_proveedor"] = "N/A"
+                            df_malla_local["nit_entidad"] = df_malla_local["nombre_entidad"]
+                            df_malla_local["sum_valor"] = df_malla_local["valor_total"]
+                            df_malla_local["cant_contratos"] = df_malla_local["contratos"]
+                            
+                            st.session_state["forensic_malla_data"] = df_malla_local
+                            
+                            # Mapear columnas para simular respuesta de Socrata (Contratos/Matriz)
+                            df_contratos_local = df_malla_local.copy()
+                            df_contratos_local["valor_del_contrato"] = df_malla_local["valor_total"]
+                            df_contratos_local["estado_del_contrato"] = "Agregado Local"
+                            df_contratos_local["fecha_de_firma"] = "Varios Contratos"
+                            df_contratos_local["fecha_de_inicio"] = ""
+                            df_contratos_local["fecha_fin"] = ""
+                            df_contratos_local["valor_pago_adelantado"] = 0
+                            df_contratos_local["valor_amortizado"] = 0
+                            df_contratos_local["valor_pendiente"] = 0
+                            
+                            st.session_state["forensic_contratos_data"] = df_contratos_local
+                        else:
+                            st.session_state["forensic_malla_data"] = None
+                            st.session_state["forensic_contratos_data"] = None
 
         # 3. CAPA DE RENDERIZADO VISUAL ESTABLE (Pinta leyendo la memoria caché local de la sesión)
         if st.session_state["forensic_prov_selected"] is not None:
