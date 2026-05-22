@@ -1046,7 +1046,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                         
                         # Consulta C: Historial financiero detallado (Buscado por NIT_PROVEEDOR para evitar fallos de strings con puntos)
                         st.session_state["forensic_contratos_data"] = soql_focal({
-                            "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio, fecha_fin, estado_del_contrato, tipo_de_contrato, valor_pago_adelantado, valor_amortizado, valor_pendiente",
+                            "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio, fecha_fin, estado_del_contrato, tipo_de_contrato, modalidad_de_contratacion, valor_pago_adelantado, valor_amortizado, valor_pendiente",
                             "$where": f"date_extract_y(fecha_de_firma) = {anio} AND nit_proveedor = '{nit_prov_central}'",
                             "$order": "valor_del_contrato DESC",
                             "$limit": "100"
@@ -1134,9 +1134,10 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     if col_f in df_contratos.columns:
                         df_contratos[col_f] = df_contratos[col_f].astype(str).str.replace("T00:00:00.000", "", regex=False)
 
+                mod_col = df_contratos["modalidad_de_contratacion"] if "modalidad_de_contratacion" in df_contratos.columns else df_contratos["tipo_de_contrato"]
                 df_detallado_disp = pd.DataFrame({
                     "Entidad Contratante": df_contratos["nombre_entidad"],
-                    "Modalidad / Tipo": df_contratos["tipo_de_contrato"].fillna("No Especificado"),
+                    "Modalidad / Tipo": mod_col.fillna("No Especificado"),
                     "Estado": df_contratos["estado_del_contrato"].fillna("Desconocido"),
                     "Cuantía": df_contratos["valor_del_contrato"].apply(format_b),
                     "Firma": df_contratos["fecha_de_firma"],
