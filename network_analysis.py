@@ -999,7 +999,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     with st.spinner("Indexando identificadores únicos (NIT) en Socrata..."):
                         safe_prov_raw = str(proveedor_actual).replace("'", "''")
                         df_ids = soql_focal({
-                            "$select": "nit_proveedor, nombre_representante_legal, identificaci_n_representante_legal",
+                            "$select": "documento_proveedor AS nit_proveedor, nombre_representante_legal, identificaci_n_representante_legal",
                             "$where": f"upper(proveedor_adjudicado) = '{safe_prov_raw.upper()}'",
                             "$limit": "1"
                         })
@@ -1035,8 +1035,8 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                         where_malla = f"identificaci_n_representante_legal = '{nit_rep_central}'"
                         where_contratos = f"identificaci_n_representante_legal = '{nit_rep_central}'"
                     else:
-                        where_malla = f"nit_proveedor = '{nit_prov_central}'"
-                        where_contratos = f"nit_proveedor = '{nit_prov_central}'"
+                        where_malla = f"documento_proveedor = '{nit_prov_central}'"
+                        where_contratos = f"documento_proveedor = '{nit_prov_central}'"
                 else:
                     safe_prov_raw = str(proveedor_actual).replace("'", "''").upper()
                     where_malla = f"upper(trim(proveedor_adjudicado)) = '{safe_prov_raw}'"
@@ -1045,9 +1045,9 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                 with st.spinner("Construyendo matriz relacional y buscando transacciones..."):
                     # Consulta B: Malla relacional
                     df_malla_api = soql_focal({
-                        "$select": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
+                        "$select": "proveedor_adjudicado, documento_proveedor AS nit_proveedor, nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
                         "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
-                        "$group": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad",
+                        "$group": "proveedor_adjudicado, documento_proveedor, nombre_entidad, nit_entidad",
                         "$limit": "250"
                     })
                     
