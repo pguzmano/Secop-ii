@@ -1006,26 +1006,40 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
     # =========================================================================
     with st.spinner("Rastreando cadena de custodia y NITs corporativos..."):
         df_ids = soql_focal({
-            "$select": "nit_proveedor, representante_legal, nit_representante_legal",
-            "$where": f"upper(trim(proveedor_adjudicado)) = '{safe_prov}' AND nit_representante_legal IS NOT NULL",
+            "$select": "nit_proveedor, nombre_representante_legal, identificacion_representante_legal",
+            "$where": f"upper(trim(proveedor_adjudicado)) = '{safe_prov}'",
             "$limit": "1"
         })
 
     if df_ids.empty:
-        st.warning(f"El proveedor {proveedor_sel} no registra NIT de Representante Legal para cruces de carrusel.")
+        st.warning(f"⚠️ No se pudieron recuperar los identificadores de Socrata para: {proveedor_sel}")
+        return
     else:
         nit_prov_central = str(df_ids.iloc[0].get("nit_proveedor", "N/A"))
-        rep_legal_nom    = str(df_ids.iloc[0].get("representante_legal", "NO REGISTRADO")).upper()
-        nit_rep_central  = str(df_ids.iloc[0].get("nit_representante_legal", "N/A"))
+        rep_legal_nom    = str(df_ids.iloc[0].get("nombre_representante_legal", "NO REGISTRADO EN FILA")).upper()
+        nit_rep_central  = str(df_ids.iloc[0].get("identificacion_representante_legal", "N/A"))
+
+        # Construcción de la condición lógica de rastreo forense (Cruce por NIT de Representante o NIT de Empresa)
+        if nit_rep_central != "N/A" and nit_rep_central.strip() != "" and nit_rep_central != "nan" and nit_rep_central != "None":
+            where_malla = f"identificacion_representante_legal = '{nit_rep_central}'"
+            id_raiz = nit_rep_central
+            lbl_origen = f"REP: {rep_legal_nom[:18]}..."
+            title_origen = f"Representante Legal:<br>{rep_legal_nom}<br>ID: {nit_rep_central}"
+        else:
+            # Fallback estratégico: Si la fila no tiene ID de representante, cruzamos por el NIT de la empresa
+            where_malla = f"nit_proveedor = '{nit_prov_central}'"
+            id_raiz = nit_prov_central
+            lbl_origen = f"CONTRATISTA PRINCIPAL"
+            title_origen = f"Proveedor: {proveedor_sel}<br>NIT: {nit_prov_central}"
 
         # =========================================================================
         # B) CRUCE FORENSE: Buscar todas las empresas que comparten este Representante y sus Entidades
         # =========================================================================
-        with st.spinner("Rastreando malla empresarial por NIT..."):
+        with st.spinner("Rastreando malla empresarial..."):
             safe_nit = nit_rep_central.replace("'", "''")
             df_malla_total = soql_focal({
                 "$select": "upper(trim(proveedor_adjudicado)) AS proveedor_adjudicado, nit_proveedor, upper(trim(nombre_entidad)) AS nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
-                "$where": f"nit_representante_legal = '{safe_nit}' AND date_extract_y(fecha_de_firma) = {anio}",
+                "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
                 "$group": "upper(trim(proveedor_adjudicado)), nit_proveedor, upper(trim(nombre_entidad)), nit_entidad",
                 "$limit": "300"
             })
@@ -1080,11 +1094,11 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
             # Configuración física óptima para evitar rebotes continuos o congelamiento
             net.barnes_hut(gravity=-1500, central_gravity=0.4, spring_length=95)
 
-            # Nodo Central: Representante Legal
+            # Nodo Central: Representante Legal o Fallback
             net.add_node(
-                nit_rep_central,
-                label=f"REP: {rep_legal_nom[:18]}...",
-                title=f"Representante Legal:<br>{rep_legal_nom}<br>ID: {nit_rep_central}",
+                id_raiz,
+                label=lbl_origen,
+                title=title_origen,
                 color="#F43F5E", size=24, shape="diamond"
             )
 
@@ -1114,8 +1128,8 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                         title=f"Razón Social: {e_nom}<br>NIT: {e_nit}",
                         color=color_empresa, size=18, shape="dot"
                     )
-                    # Conectar Representante -> Empresa
-                    net.add_edge(nit_rep_central, e_nit, color="#F43F5E", width=2, dash=True)
+                    # Conectar Raíz -> Empresa
+                    net.add_edge(id_raiz, e_nit, color="#F43F5E", width=2, dash=True)
                     empresas_vistas.add(e_nit)
 
                 # Agregar Nodos de Entidades Públicas (Nivel 3)
