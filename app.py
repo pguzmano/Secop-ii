@@ -461,22 +461,34 @@ def init_state():
         if k not in st.session_state:
             st.session_state[k] = v
 
+def reset_actor():
+    st.session_state["actor_seleccionado"] = ""
+    st.session_state["select_actor_raw"] = "🌍 Mostrar Red Completa"
+    st.session_state["entity_selector_kpi"] = "🌍 Todas las Entidades"
+    st.session_state["forensic_prov_selected"] = None
+    st.session_state["forensic_malla_data"] = None
+    st.session_state["forensic_contratos_data"] = None
+    st.session_state["forensic_metadata"] = None
+
 def set_dep(dep_norm: str, dep_raw: str):
     """dep_norm = sin tildes (GeoJSON). dep_raw = nombre original de la API."""
     st.session_state["dep_norm"] = dep_norm
     st.session_state["dep_raw"]  = dep_raw
     st.session_state["mun_norm"] = ""
     st.session_state["mun_raw"]  = ""
+    reset_actor()
 
 def set_mun(mun_norm: str, mun_raw: str):
     st.session_state["mun_norm"] = mun_norm
     st.session_state["mun_raw"]  = mun_raw
+    reset_actor()
 
 def reset():
     st.session_state["dep_norm"]  = ""
     st.session_state["dep_raw"]   = ""
     st.session_state["mun_norm"]  = ""
     st.session_state["mun_raw"]   = ""
+    reset_actor()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
