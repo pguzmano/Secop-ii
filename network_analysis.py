@@ -999,7 +999,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     with st.spinner("Indexando identificadores únicos (NIT) en Socrata..."):
                         safe_prov_raw = str(proveedor_actual).replace("'", "''")
                         df_ids = soql_focal({
-                            "$select": "nit_proveedor, nombre_representante_legal, identificacion_representante_legal",
+                            "$select": "nit_proveedor, nombre_representante_legal, identificaci_n_representante_legal",
                             "$where": f"upper(proveedor_adjudicado) = '{safe_prov_raw.upper()}'",
                             "$limit": "1"
                         })
@@ -1007,7 +1007,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     if not df_ids.empty:
                         nit_prov_central = df_ids.iloc[0].get("nit_proveedor", "N/A")
                         rep_legal_nom = str(df_ids.iloc[0].get("nombre_representante_legal", "NO REGISTRADO")).upper()
-                        nit_rep_central = df_ids.iloc[0].get("identificacion_representante_legal", "N/A")
+                        nit_rep_central = df_ids.iloc[0].get("identificaci_n_representante_legal", "N/A")
                     else:
                         nit_prov_central = "N/A"
                         rep_legal_nom = "NO REGISTRADO"
@@ -1015,7 +1015,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                 else:
                     # Extraemos el resto de metadatos de la fila local si existen, o les damos un fallback por defecto
                     rep_legal_nom = str(fila_origen.get("nombre_representante_legal", fila_origen.get("representante_legal", "NO REGISTRADO"))).upper()
-                    nit_rep_central = fila_origen.get("identificacion_representante_legal", fila_origen.get("nit_representante_legal", "N/A"))
+                    nit_rep_central = fila_origen.get("identificaci_n_representante_legal", fila_origen.get("identificacion_representante_legal", fila_origen.get("nit_representante_legal", "N/A")))
 
                 # Normalización de seguridad para NIT del Representante Legal
                 if pd.isna(nit_rep_central) or str(nit_rep_central).strip() == "" or nit_rep_central == "N/A":
@@ -1032,8 +1032,8 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                 if nit_prov_central != "N/A":
                     # Si hay NIT de representante barremos la malla corporativa completa; si no, aislamos por el NIT de la empresa
                     if nit_rep_central != "N/A":
-                        where_malla = f"identificacion_representante_legal = '{nit_rep_central}'"
-                        where_contratos = f"identificacion_representante_legal = '{nit_rep_central}'"
+                        where_malla = f"identificaci_n_representante_legal = '{nit_rep_central}'"
+                        where_contratos = f"identificaci_n_representante_legal = '{nit_rep_central}'"
                     else:
                         where_malla = f"nit_proveedor = '{nit_prov_central}'"
                         where_contratos = f"nit_proveedor = '{nit_prov_central}'"
