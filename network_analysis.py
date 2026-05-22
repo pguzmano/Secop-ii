@@ -82,10 +82,10 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
     conds.append("valor_del_contrato IS NOT NULL")
 
     if dep_raw:
-        safe_dep = dep_raw.replace("'", "''")
+        safe_dep = dep_raw.upper().replace("'", "''")
         conds.append(f"upper(departamento) = '{safe_dep}'")
     if mun_raw:
-        safe_mun = mun_raw.replace("'", "''")
+        safe_mun = mun_raw.upper().replace("'", "''")
         conds.append(f"upper(ciudad) = '{safe_mun}'")
 
     # ⬇️ SoQL con GROUP BY en el servidor → llegan ~150 filas en vez de 1000
@@ -1041,6 +1041,14 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     safe_prov_raw = str(proveedor_actual).replace("'", "''").upper()
                     where_malla = f"upper(trim(proveedor_adjudicado)) = '{safe_prov_raw}'"
                     where_contratos = f"upper(trim(proveedor_adjudicado)) = '{safe_prov_raw}'"
+
+                # 🌍 Aplicar filtro geográfico si existe para focalizar el expediente
+                if dep_raw:
+                    where_malla += f" AND upper(departamento) = '{dep_raw.upper().replace(chr(39), chr(39)+chr(39))}'"
+                    where_contratos += f" AND upper(departamento) = '{dep_raw.upper().replace(chr(39), chr(39)+chr(39))}'"
+                if mun_raw:
+                    where_malla += f" AND upper(ciudad) = '{mun_raw.upper().replace(chr(39), chr(39)+chr(39))}'"
+                    where_contratos += f" AND upper(ciudad) = '{mun_raw.upper().replace(chr(39), chr(39)+chr(39))}'"
 
                 with st.spinner("Construyendo matriz relacional y buscando transacciones..."):
                     # Consulta B: Malla relacional
