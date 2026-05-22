@@ -952,11 +952,17 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
     if prov_df.empty:
         st.info("No hay datos de contratistas disponibles en la capa filtrada.")
     else:
-        # 1. PREPARACIÓN Y MONTAJE DE LA TABLA MAESTRA
-        df_maestra = prov_df[[
-            "proveedor_adjudicado", "contratos_totales", "valor_total", "pct_directa", "score_forense"
-        ]].copy()
+        # 1. MAPEO ELÁSTICO DE COLUMNAS ORIGINALES (Evita KeyError de Pandas)
+        cols_actuales = prov_df.columns.tolist()
         
+        col_prov = "proveedor_adjudicado" if "proveedor_adjudicado" in cols_actuales else ("proveedor" if "proveedor" in cols_actuales else cols_actuales[0])
+        col_cnt = "contratos_totales" if "contratos_totales" in cols_actuales else ("contratos" if "contratos" in cols_actuales else "contratos")
+        col_val = "valor_total" if "valor_total" in cols_actuales else ("valor" if "valor" in cols_actuales else "valor")
+        col_pct = "pct_directa" if "pct_directa" in cols_actuales else ("directa_pct" if "directa_pct" in cols_actuales else "pct_directa")
+        col_score = "score_forense" if "score_forense" in cols_actuales else ("score" if "score" in cols_actuales else "score_forense")
+
+        # Construcción de la Tabla Maestra Visual
+        df_maestra = prov_df[[col_prov, col_cnt, col_val, col_pct, col_score]].copy()
         df_maestra.columns = ["Contratista / Proveedor", "Contratos", "Monto Total", "% Contr. Directa", "Score Forense"]
         df_maestra = df_maestra.sort_values(by="Score Forense", ascending=False)
 
@@ -972,73 +978,83 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
             key="tabla_maestra_forense"
         )
 
-        # 2. CAPA DE PROCESAMIENTO ASINCRÓNICO (Se ejecuta solo si cambia la selección)
+        # 2. CAPA DE PROCESAMIENTO FORENSE INDEXADA POR NIT
         if evento_seleccion and evento_seleccion.selection and evento_seleccion.selection.rows:
             idx_tabla = evento_seleccion.selection.rows[0]
-            proveedor_actual = df_maestra.iloc[idx_tabla]["Contratista / Proveedor"]
             
-            # Detectamos si es una nueva selección real para evitar bucles de consultas
+            # Recuperamos la fila original completa de prov_df usando el índice de posición absoluta
+            fila_origen = prov_df.iloc[idx_tabla]
+            proveedor_actual = fila_origen[col_prov]
+            
+            # Evaluamos cambio de selección para no repetir llamadas asíncronas
             if st.session_state["forensic_prov_selected"] != proveedor_actual:
                 st.session_state["forensic_prov_selected"] = proveedor_actual
                 
-                # Limpieza elástica del nombre (remueve puntos para saltar las restricciones de URLs en Socrata)
-                clean_name = proveedor_actual.replace(".", "").replace("S A S", "").replace("SAS", "").strip()
-                safe_clean_name = clean_name.replace("'", "''")
+                # Intentamos extraer el NIT del proveedor directamente de los datos locales precalculados
+                nit_prov_central = fila_origen.get("nit_proveedor", "N/A")
                 
-                with st.spinner("Rastreando registros e identificadores en la API..."):
-                    # Consulta A: Obtener llaves estructurales (NITs)
-                    df_ids = soql_focal({
-                        "$select": "nit_proveedor, nombre_representante_legal, identificacion_representante_legal",
-                        "$where": f"upper(proveedor_adjudicado) like '%{safe_clean_name.upper()}%'",
-                        "$limit": "1"
-                    })
-                    
-                    # Fallback estricto por si el LIKE elástico no hace match
-                    if df_ids.empty:
-                        safe_prov_raw = proveedor_actual.replace("'", "''")
+                # Si el NIT no viene en prov_df, hacemos una única consulta rápida a Socrata usando el índice exacto
+                if pd.isna(nit_prov_central) or nit_prov_central == "N/A":
+                    with st.spinner("Indexando identificadores únicos (NIT) en Socrata..."):
+                        safe_prov_raw = str(proveedor_actual).replace("'", "''")
                         df_ids = soql_focal({
                             "$select": "nit_proveedor, nombre_representante_legal, identificacion_representante_legal",
                             "$where": f"upper(proveedor_adjudicado) = '{safe_prov_raw.upper()}'",
                             "$limit": "1"
                         })
-
-                if not df_ids.empty:
-                    nit_prov_central = df_ids.iloc[0].get("nit_proveedor", "N/A")
-                    rep_legal_nom = str(df_ids.iloc[0].get("nombre_representante_legal", "NO REGISTRADO")).upper()
-                    nit_rep_central = df_ids.iloc[0].get("identificacion_representante_legal", "N/A")
-                    
-                    if pd.isna(nit_rep_central) or str(nit_rep_central).strip() == "" or nit_rep_central == "N/A":
+                        
+                    if not df_ids.empty:
+                        nit_prov_central = df_ids.iloc[0].get("nit_proveedor", "N/A")
+                        rep_legal_nom = str(df_ids.iloc[0].get("nombre_representante_legal", "NO REGISTRADO")).upper()
+                        nit_rep_central = df_ids.iloc[0].get("identificacion_representante_legal", "N/A")
+                    else:
+                        nit_prov_central = "N/A"
+                        rep_legal_nom = "NO REGISTRADO"
                         nit_rep_central = "N/A"
+                else:
+                    # Extraemos el resto de metadatos de la fila local si existen, o les damos un fallback por defecto
+                    rep_legal_nom = str(fila_origen.get("nombre_representante_legal", fila_origen.get("representante_legal", "NO REGISTRADO"))).upper()
+                    nit_rep_central = fila_origen.get("identificacion_representante_legal", fila_origen.get("nit_representante_legal", "N/A"))
 
-                    st.session_state["forensic_metadata"] = {
-                        "nit_proveedor": nit_prov_central,
-                        "rep_legal": rep_legal_nom,
-                        "nit_rep": nit_rep_central
-                    }
+                # Normalización de seguridad para NIT del Representante Legal
+                if pd.isna(nit_rep_central) or str(nit_rep_central).strip() == "" or nit_rep_central == "N/A":
+                    nit_rep_central = "N/A"
 
-                    # Pivote lógico: Si hay representante barremos la malla (carrusel), si no, aislamos por NIT Empresa
+                # Almacenamos la estructura en la sesión de forma segura
+                st.session_state["forensic_metadata"] = {
+                    "nit_proveedor": nit_prov_central,
+                    "rep_legal": rep_legal_nom,
+                    "nit_rep": nit_rep_central
+                }
+
+                if nit_prov_central != "N/A":
+                    # CONSTRUCCIÓN DE LA QUERY CON ENFOQUE EXCLUSIVO EN NIT
+                    # Si hay NIT de representante barremos la malla corporativa completa; si no, aislamos por el NIT de la empresa
                     if nit_rep_central != "N/A":
                         where_malla = f"identificacion_representante_legal = '{nit_rep_central}'"
                     else:
                         where_malla = f"nit_proveedor = '{nit_prov_central}'"
 
-                    with st.spinner("Descargando mapa relacional y financiero..."):
-                        # Consulta B: Estructura de la Malla Relacional
+                    with st.spinner("Construyendo matriz relacional tripartita por NIT..."):
+                        # Consulta B: Malla relacional tripartita (Agrupada por NIT en el Servidor)
                         st.session_state["forensic_malla_data"] = soql_focal({
                             "$select": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
                             "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
                             "$group": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad",
-                            "$limit": "200"
+                            "$limit": "250"
                         })
                         
-                        # Consulta C: Historial financiero detallado (Saneada por completo)
-                        safe_prov_query = proveedor_actual.replace("'", "''")
+                        # Consulta C: Historial financiero detallado (Buscado por NIT_PROVEEDOR para evitar fallos de strings con puntos)
                         st.session_state["forensic_contratos_data"] = soql_focal({
                             "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio, fecha_fin, estado_del_contrato, tipo_de_contrato, valor_pago_adelantado, valor_amortizado, valor_pendiente",
-                            "$where": f"date_extract_y(fecha_de_firma) = {anio} AND upper(proveedor_adjudicado) = '{safe_prov_query.upper()}'",
+                            "$where": f"date_extract_y(fecha_de_firma) = {anio} AND nit_proveedor = '{nit_prov_central}'",
                             "$order": "valor_del_contrato DESC",
                             "$limit": "100"
                         })
+                else:
+                    # Si no hay NIT, forzamos la nulidad para el render
+                    st.session_state["forensic_malla_data"] = None
+                    st.session_state["forensic_contratos_data"] = None
 
         # 3. CAPA DE RENDERIZADO VISUAL ESTABLE (Pinta leyendo la memoria caché local de la sesión)
         if st.session_state["forensic_prov_selected"] is not None:
