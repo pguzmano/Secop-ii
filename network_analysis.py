@@ -1118,7 +1118,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                 total_entidades_afectadas = df_malla_total["nit_entidad"].nunique()
                 monto_global_red = df_malla_total["sum_valor"].sum()
                 
-                col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+                col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
                 with col_kpi1:
                     color_alert = "#F43F5E" if total_empresas_malla > 1 else "#22C55E"
                     st.markdown(f"""
@@ -1139,6 +1139,16 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     <div style='background:#0D1421; border:1px solid #1A2336; border-radius:8px; padding:12px; text-align:center;'>
                         <div style='font-size:0.65rem; color:#64748B; font-weight:700; text-transform:uppercase;'>Presupuesto Comprometido en Red</div>
                         <div style='font-size:1.2rem; font-weight:900; color:#F59E0B; margin-top:6px;'>{format_b(monto_global_red)}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col_kpi4:
+                    rep_nombre = metadata.get("rep_legal", "NO REGISTRADO")
+                    rep_doc = metadata.get("nit_rep", "N/A")
+                    st.markdown(f"""
+                    <div style='background:#0D1421; border:1px solid #1A2336; border-radius:8px; padding:12px; text-align:center;'>
+                        <div style='font-size:0.65rem; color:#64748B; font-weight:700; text-transform:uppercase;'>Representante Legal</div>
+                        <div style='font-size:0.9rem; font-weight:900; color:#E2E8F0; margin-top:4px;' title='{rep_nombre}'>{rep_nombre[:25] + '...' if len(rep_nombre)>25 else rep_nombre}</div>
+                        <div style='font-size:0.75rem; font-weight:700; color:#4F8EF7; margin-top:2px;'>ID: {rep_doc}</div>
                     </div>
                     """, unsafe_allow_html=True)
 
