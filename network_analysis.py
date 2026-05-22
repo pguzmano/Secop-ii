@@ -1002,59 +1002,73 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
     )
 
     # =========================================================================
-    # A) Consulta relacional base: Extraer NITs de control del proveedor seleccionado
+    # A) Consulta relacional base: Extraer NITs usando busqueda elastica
+    # Socrata es sensible a puntos, espacios y case: usamos LIKE con raiz limpia
     # =========================================================================
+    import re as _re
+
+    # Generar termino de busqueda limpio: removemos S.A.S, SAS, puntos, espacios extra
+    _clean = proveedor_sel.upper()
+    _clean = _re.sub(r'[\.\,]', '', _clean)              # quitar puntos y comas
+    _clean = _re.sub(r'\bS\s*A\s*S\b', '', _clean)      # quitar SAS / S.A.S / S A S
+    _clean = _re.sub(r'\bLTDA\b', '', _clean)             # quitar LTDA
+    _clean = _re.sub(r'\bSACI\b', '', _clean)             # quitar SACI
+    _clean = _re.sub(r'\s+', ' ', _clean).strip()         # colapsar espacios dobles
+    # Tomar solo la primera palabra clave significativa (>4 caracteres) para max elasticidad
+    _words = [w for w in _clean.split() if len(w) > 4]
+    _search_term = _words[0] if _words else _clean[:10]
+    safe_term = _search_term.replace("'", "''")
+
+    df_ids = pd.DataFrame()
+
+    # Intento 1: Igualdad exacta sin puntos usando upper()
     with st.spinner("Rastreando cadena de custodia y NITs corporativos..."):
-        # OPTIMIZACIÓN: Forzamos upper() en el WHERE de Socrata para que coincida 
-        # sin importar cómo esté digitado en el servidor de origen
         df_ids = soql_focal({
             "$select": "nit_proveedor, nombre_representante_legal, identificacion_representante_legal",
-            "$where": f"upper(proveedor_adjudicado) = '{safe_prov.upper()}'",
+            "$where": f"upper(proveedor_adjudicado) like '%{safe_term}%'",
             "$limit": "1"
         })
 
-    if df_ids.empty:
-        # PLAN DE CONTINGENCIA B: Si por nombre sigue fallando (por un espacio oculto),
-        # intentamos buscar de forma parcial usando el operador LIKE
-        with st.spinner("Reintentando indexación por coincidencia parcial..."):
+    # Intento 2: Si falla, usar la segunda palabra clave
+    if df_ids.empty and len(_words) > 1:
+        safe_term2 = _words[1].replace("'", "''")
+        with st.spinner("Reintentando con termino alternativo..."):
             df_ids = soql_focal({
                 "$select": "nit_proveedor, nombre_representante_legal, identificacion_representante_legal",
-                "$where": f"upper(proveedor_adjudicado) like '%{safe_prov.upper()}%'",
+                "$where": f"upper(proveedor_adjudicado) like '%{safe_term2}%'",
                 "$limit": "1"
             })
 
     if df_ids.empty:
-        st.error(f"❌ Error crítico: No se encontró un NIT válido en Socrata para la entidad corporativa: {proveedor_sel}")
+        st.error(f"❌ No se pudo recuperar el NIT para: {proveedor_sel}. Verifica que el nombre exista en el dataset del año seleccionado.")
         return
     else:
         nit_prov_central = str(df_ids.iloc[0].get("nit_proveedor", "N/A"))
-        rep_legal_nom    = str(df_ids.iloc[0].get("nombre_representante_legal", "NO REGISTRADO EN FILA")).upper()
+        rep_legal_nom    = str(df_ids.iloc[0].get("nombre_representante_legal", "NO REGISTRADO")).upper()
         nit_rep_central  = df_ids.iloc[0].get("identificacion_representante_legal", "N/A")
 
-        # Si el NIT del representante está ausente, usamos una cadena vacía para el control lógico
-        if pd.isna(nit_rep_central) or str(nit_rep_central).strip() == "" or nit_rep_central == "N/A" or nit_rep_central == "nan" or nit_rep_central == "None":
+        # Normalizar nulos del representante
+        if pd.isna(nit_rep_central) or str(nit_rep_central).strip() in ("", "N/A", "nan", "None"):
             nit_rep_central = "N/A"
         else:
             nit_rep_central = str(nit_rep_central).strip()
 
-        # Construcción de la condición lógica de rastreo forense (Cruce por NIT de Representante o NIT de Empresa)
+        # Definicion del pivote: preferimos cruzar por ID del representante; si no, por NIT empresa
         if nit_rep_central != "N/A":
-            where_malla = f"identificacion_representante_legal = '{nit_rep_central}'"
-            id_raiz = nit_rep_central
-            lbl_origen = f"REP: {rep_legal_nom[:18]}..."
+            where_malla  = f"identificacion_representante_legal = '{nit_rep_central}'"
+            id_raiz      = nit_rep_central
+            lbl_origen   = f"REP: {rep_legal_nom[:18]}..."
             title_origen = f"Representante Legal:<br>{rep_legal_nom}<br>ID: {nit_rep_central}"
         else:
-            # Fallback estratégico: Si la fila no tiene ID de representante, cruzamos por el NIT de la empresa
-            where_malla = f"nit_proveedor = '{nit_prov_central}'"
-            id_raiz = nit_prov_central
-            lbl_origen = f"CONTRATISTA PRINCIPAL"
+            where_malla  = f"nit_proveedor = '{nit_prov_central}'"
+            id_raiz      = nit_prov_central
+            lbl_origen   = "CONTRATISTA PRINCIPAL"
             title_origen = f"Proveedor: {proveedor_sel}<br>NIT: {nit_prov_central}"
 
         # =========================================================================
-        # B) CRUCE FORENSE: Buscar todas las empresas que comparten este Representante y sus Entidades
+        # B) CRUCE FORENSE: Buscar todas las empresas que comparten este Representante
         # =========================================================================
-        with st.spinner("Rastreando malla empresarial..."):
-            safe_nit = nit_rep_central.replace("'", "''")
+        with st.spinner("Construyendo matriz de relaciones financieras..."):
             df_malla_total = soql_focal({
                 "$select": "upper(trim(proveedor_adjudicado)) AS proveedor_adjudicado, nit_proveedor, upper(trim(nombre_entidad)) AS nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
                 "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
