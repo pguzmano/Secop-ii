@@ -1028,6 +1028,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     "nit_rep": nit_rep_central
                 }
 
+
                 if nit_prov_central != "N/A":
                     # Si hay NIT de representante barremos la malla corporativa completa; si no, aislamos por el NIT de la empresa
                     if nit_rep_central != "N/A":
@@ -1036,23 +1037,28 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     else:
                         where_malla = f"nit_proveedor = '{nit_prov_central}'"
                         where_contratos = f"nit_proveedor = '{nit_prov_central}'"
+                else:
+                    safe_prov_raw = str(proveedor_actual).replace("'", "''").upper()
+                    where_malla = f"upper(trim(proveedor_adjudicado)) = '{safe_prov_raw}'"
+                    where_contratos = f"upper(trim(proveedor_adjudicado)) = '{safe_prov_raw}'"
 
-                    with st.spinner("Construyendo matriz relacional y buscando transacciones..."):
-                        # Consulta B: Malla relacional
-                        df_malla_api = soql_focal({
-                            "$select": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
-                            "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
-                            "$group": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad",
-                            "$limit": "250"
-                        })
-                        
-                        # Consulta C: Historial financiero detallado
-                        df_contratos_api = soql_focal({
-                            "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio_del_contrato AS fecha_de_inicio, fecha_de_fin_del_contrato AS fecha_fin, estado_contrato AS estado_del_contrato, tipo_de_contrato, modalidad_de_contratacion, valor_de_pago_adelantado AS valor_pago_adelantado, valor_amortizado, valor_pendiente_de_pago AS valor_pendiente",
-                            "$where": f"date_extract_y(fecha_de_firma) = {anio} AND {where_contratos}",
-                            "$order": "valor_del_contrato DESC",
-                            "$limit": "100"
-                        })
+                with st.spinner("Construyendo matriz relacional y buscando transacciones..."):
+                    # Consulta B: Malla relacional
+                    df_malla_api = soql_focal({
+                        "$select": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
+                        "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
+                        "$group": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad",
+                        "$limit": "250"
+                    })
+                    
+                    # Consulta C: Historial financiero detallado
+                    df_contratos_api = soql_focal({
+                        "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio_del_contrato AS fecha_de_inicio, fecha_de_fin_del_contrato AS fecha_fin, estado_contrato AS estado_del_contrato, tipo_de_contrato, modalidad_de_contratacion, valor_de_pago_adelantado AS valor_pago_adelantado, valor_amortizado, valor_pendiente_de_pago AS valor_pendiente",
+                        "$where": f"date_extract_y(fecha_de_firma) = {anio} AND {where_contratos}",
+                        "$order": "valor_del_contrato DESC",
+                        "$limit": "100"
+                    })
+
                 if df_malla_api is not None and not df_malla_api.empty:
                     st.session_state["forensic_malla_data"] = df_malla_api
                     st.session_state["forensic_contratos_data"] = df_contratos_api
