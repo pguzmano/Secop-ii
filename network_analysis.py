@@ -1028,33 +1028,35 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                 }
 
                 if nit_prov_central != "N/A":
-                    # CONSTRUCCIÓN DE LA QUERY CON ENFOQUE EXCLUSIVO EN NIT
                     # Si hay NIT de representante barremos la malla corporativa completa; si no, aislamos por el NIT de la empresa
                     if nit_rep_central != "N/A":
                         where_malla = f"identificacion_representante_legal = '{nit_rep_central}'"
+                        where_contratos = f"identificacion_representante_legal = '{nit_rep_central}'"
                     else:
                         where_malla = f"nit_proveedor = '{nit_prov_central}'"
-
-                    with st.spinner("Construyendo matriz relacional tripartita por NIT..."):
-                        # Consulta B: Malla relacional tripartita (Agrupada por NIT en el Servidor)
-                        st.session_state["forensic_malla_data"] = soql_focal({
-                            "$select": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
-                            "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
-                            "$group": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad",
-                            "$limit": "250"
-                        })
-                        
-                        # Consulta C: Historial financiero detallado (Buscado por NIT_PROVEEDOR para evitar fallos de strings con puntos)
-                        st.session_state["forensic_contratos_data"] = soql_focal({
-                            "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio, fecha_fin, estado_del_contrato, tipo_de_contrato, modalidad_de_contratacion, valor_pago_adelantado, valor_amortizado, valor_pendiente",
-                            "$where": f"date_extract_y(fecha_de_firma) = {anio} AND nit_proveedor = '{nit_prov_central}'",
-                            "$order": "valor_del_contrato DESC",
-                            "$limit": "100"
-                        })
+                        where_contratos = f"nit_proveedor = '{nit_prov_central}'"
                 else:
-                    # Si no hay NIT, forzamos la nulidad para el render
-                    st.session_state["forensic_malla_data"] = None
-                    st.session_state["forensic_contratos_data"] = None
+                    # FALLBACK: Si no hay NIT, buscamos estrictamente por el nombre del proveedor
+                    safe_prov_raw = str(proveedor_actual).replace("'", "''").upper()
+                    where_malla = f"upper(proveedor_adjudicado) = '{safe_prov_raw}'"
+                    where_contratos = f"upper(proveedor_adjudicado) = '{safe_prov_raw}'"
+
+                with st.spinner("Construyendo matriz relacional y buscando transacciones..."):
+                    # Consulta B: Malla relacional
+                    st.session_state["forensic_malla_data"] = soql_focal({
+                        "$select": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
+                        "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
+                        "$group": "proveedor_adjudicado, nit_proveedor, nombre_entidad, nit_entidad",
+                        "$limit": "250"
+                    })
+                    
+                    # Consulta C: Historial financiero detallado
+                    st.session_state["forensic_contratos_data"] = soql_focal({
+                        "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio, fecha_fin, estado_del_contrato, tipo_de_contrato, modalidad_de_contratacion, valor_pago_adelantado, valor_amortizado, valor_pendiente",
+                        "$where": f"date_extract_y(fecha_de_firma) = {anio} AND {where_contratos}",
+                        "$order": "valor_del_contrato DESC",
+                        "$limit": "100"
+                    })
 
         # 3. CAPA DE RENDERIZADO VISUAL ESTABLE (Pinta leyendo la memoria caché local de la sesión)
         if st.session_state["forensic_prov_selected"] is not None:
@@ -1067,6 +1069,9 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
             st.markdown(f"<h4>📋 Expediente de Auditoría: <span style='color:#4F8EF7;'>{prov_activo}</span></h4>", unsafe_allow_html=True)
 
             if df_malla_total is not None and not df_malla_total.empty:
+                if "nit_proveedor" not in df_malla_total.columns: df_malla_total["nit_proveedor"] = df_malla_total.get("proveedor_adjudicado", "N/A")
+                if "nit_entidad" not in df_malla_total.columns: df_malla_total["nit_entidad"] = df_malla_total.get("nombre_entidad", "N/A")
+                
                 df_malla_total["sum_valor"] = pd.to_numeric(df_malla_total["sum_valor"], errors="coerce").fillna(0)
                 df_malla_total["cant_contratos"] = pd.to_numeric(df_malla_total["cant_contratos"], errors="coerce").fillna(0)
                 
@@ -1125,6 +1130,17 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
             # Renderizado de la Tabla Detallada de Auditoría Financiera
             st.markdown("<br><div style='font-size:0.75rem; font-weight:700; color:#fff; text-transform:uppercase; margin-bottom:6px;'>💸 Historial Detallado de Procesos y Estados Financieros</div>", unsafe_allow_html=True)
             if df_contratos is not None and not df_contratos.empty:
+                if "nombre_entidad" not in df_contratos.columns: df_contratos["nombre_entidad"] = "Entidad Desconocida"
+                if "valor_del_contrato" not in df_contratos.columns: df_contratos["valor_del_contrato"] = 0
+                if "estado_del_contrato" not in df_contratos.columns: df_contratos["estado_del_contrato"] = "Desconocido"
+                if "fecha_de_firma" not in df_contratos.columns: df_contratos["fecha_de_firma"] = "No Especificada"
+                if "valor_pago_adelantado" not in df_contratos.columns: df_contratos["valor_pago_adelantado"] = 0
+                if "valor_amortizado" not in df_contratos.columns: df_contratos["valor_amortizado"] = 0
+                if "valor_pendiente" not in df_contratos.columns: df_contratos["valor_pendiente"] = 0
+                if "fecha_de_inicio" not in df_contratos.columns: df_contratos["fecha_de_inicio"] = ""
+                if "fecha_fin" not in df_contratos.columns: df_contratos["fecha_fin"] = ""
+                if "tipo_de_contrato" not in df_contratos.columns: df_contratos["tipo_de_contrato"] = "No Especificado"
+
                 df_contratos["valor_del_contrato"] = pd.to_numeric(df_contratos["valor_del_contrato"], errors="coerce").fillna(0)
                 df_contratos["valor_pago_adelantado"] = pd.to_numeric(df_contratos["valor_pago_adelantado"], errors="coerce").fillna(0)
                 df_contratos["valor_amortizado"] = pd.to_numeric(df_contratos["valor_amortizado"], errors="coerce").fillna(0)
