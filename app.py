@@ -376,7 +376,7 @@ def get_kpis_v2(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -
     total_entidades = 0
     if mun_raw:
         # En municipio, le pedimos a Socrata el conteo directo de NITs únicos para esa ciudad
-        safe_mun = mun_raw.replace("'", "''")
+        safe_mun = mun_raw.upper().replace("'", "''")
         df_mun_conteo = soql_get({
             "$select": "COUNT(DISTINCT nit_entidad) AS conteo",
             "$where": f"date_extract_y(fecha_de_firma) = {anio} AND upper(ciudad) = '{safe_mun}'",
@@ -391,7 +391,7 @@ def get_kpis_v2(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -
     elif dep_raw:
         # Mismo patrón que municipio: COUNT(DISTINCT) directo sin $group
         # Un departamento tiene <<datos que el total nacional, Socrata lo resuelve rápido
-        safe_dep = dep_raw.replace("'", "''")
+        safe_dep = dep_raw.upper().replace("'", "''")
         df_dep_conteo = soql_get({
             "$select": "COUNT(DISTINCT nit_entidad) AS conteo",
             "$where": f"date_extract_y(fecha_de_firma) = {anio} AND upper(departamento) = '{safe_dep}'",
