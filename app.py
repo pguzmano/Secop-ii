@@ -199,7 +199,7 @@ def get_departamentos(anio: int) -> pd.DataFrame:
 @monitor_latency("get_municipios")
 def get_municipios(anio: int, dep_raw: str) -> pd.DataFrame:
     """Suma por ciudad — dep_raw es el nombre con acentos tal como lo retorna la API."""
-    dep_q = dep_raw.replace("'", "''")
+    dep_q = dep_raw.upper().replace("'", "''")
     df = soql_get({
         "$select": "upper(ciudad) AS ciudad, SUM(valor_del_contrato) AS valor, COUNT(*) AS contratos",
         "$where":  (f"date_extract_y(fecha_de_firma) = {anio} "
@@ -220,7 +220,7 @@ def get_municipios(anio: int, dep_raw: str) -> pd.DataFrame:
 @st.cache_data(ttl=60, show_spinner=False)
 def get_entidades(anio: int, mun_raw: str) -> pd.DataFrame:
     """Top 20 entidades — mun_raw es el nombre con acentos tal como lo retorna la API."""
-    mun_q = mun_raw.replace("'", "''")
+    mun_q = mun_raw.upper().replace("'", "''")
     df = soql_get({
         "$select": "nombre_entidad, COUNT(*) AS contratos, SUM(valor_del_contrato) AS valor",
         "$where":  (f"date_extract_y(fecha_de_firma) = {anio} "
@@ -241,7 +241,7 @@ def get_entidades(anio: int, mun_raw: str) -> pd.DataFrame:
 @st.cache_data(ttl=60, show_spinner=False)
 def get_proveedores_municipio(anio: int, mun_raw: str) -> pd.DataFrame:
     """Top 20 proveedores adjudicados en un municipio."""
-    mun_q = mun_raw.replace("'", "''")
+    mun_q = mun_raw.upper().replace("'", "''")
     df = soql_get({
         "$select": "proveedor_adjudicado, COUNT(*) AS contratos, SUM(valor_del_contrato) AS valor",
         "$where":  (f"date_extract_y(fecha_de_firma) = {anio} "
@@ -264,10 +264,10 @@ def get_kpis_modalidad(anio: int, dep_raw: str, mun_raw: str, actor_filter: str 
     """Calcula el presupuesto y contratos agrupados por modalidad de contratación."""
     conds = [f"date_extract_y(fecha_de_firma) = {anio}"]
     if dep_raw:
-        safe = dep_raw.replace("'", "''")
+        safe = dep_raw.upper().replace("'", "''")
         conds.append(f"upper(departamento) = '{safe}'")
     if mun_raw:
-        safe = mun_raw.replace("'", "''")
+        safe = mun_raw.upper().replace("'", "''")
         conds.append(f"upper(ciudad) = '{safe}'")
     if actor_filter:
         safe_actor = actor_filter.replace("'", "''")
@@ -314,7 +314,7 @@ def get_top_entidades_global(anio: int, n: int = 20) -> pd.DataFrame:
 @st.cache_data(ttl=60, show_spinner=False)
 def get_top_entidades_dep(anio: int, dep_raw: str, n: int = 15) -> pd.DataFrame:
     """Top N entidades dentro de un departamento — usa dep_raw con acentos."""
-    dep_q = dep_raw.replace("'", "''")
+    dep_q = dep_raw.upper().replace("'", "''")
     df = soql_get({
         "$select": "nombre_entidad, upper(ciudad) AS ciudad, COUNT(*) AS contratos, SUM(valor_del_contrato) AS valor",
         "$where":  (f"date_extract_y(fecha_de_firma) = {anio} "
@@ -359,10 +359,10 @@ def get_kpis_v2(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -
         
     conds = [f"date_extract_y(fecha_de_firma) = {anio}"]
     if dep_raw:
-        safe = dep_raw.replace("'", "''")
+        safe = dep_raw.upper().replace("'", "''")
         conds.append(f"upper(departamento) = '{safe}'")
     if mun_raw:
-        safe = mun_raw.replace("'", "''")
+        safe = mun_raw.upper().replace("'", "''")
         conds.append(f"upper(ciudad) = '{safe}'")
     if actor_filter:
         safe_actor = actor_filter.replace("'", "''")
