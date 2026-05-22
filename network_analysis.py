@@ -986,10 +986,9 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
     if not (evento and evento.selection and evento.selection.rows):
         return
 
-    idx_fila      = evento.selection.rows[0]
-    proveedor_sel = df_m.iloc[idx_fila]['Contratista / Proveedor']
-    safe_prov     = proveedor_sel.replace("'", "''")
-
+    idx_tabla = evento.selection.rows[0]
+    proveedor_sel = df_m.iloc[idx_tabla]['Contratista / Proveedor']
+    
     # Separador visual
     st.markdown("<hr style='border-top:1px dashed #1A2336;margin:24px 0;'>",
                 unsafe_allow_html=True)
@@ -1001,74 +1000,60 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
         unsafe_allow_html=True
     )
 
-    # =========================================================================
-    # A) Consulta relacional base: Extraer NITs usando busqueda elastica
-    # Socrata es sensible a puntos, espacios y case: usamos LIKE con raiz limpia
-    # =========================================================================
-    import re as _re
-
-    # Generar termino de busqueda limpio: removemos S.A.S, SAS, puntos, espacios extra
-    _clean = proveedor_sel.upper()
-    _clean = _re.sub(r'[\.\,]', '', _clean)              # quitar puntos y comas
-    _clean = _re.sub(r'\bS\s*A\s*S\b', '', _clean)      # quitar SAS / S.A.S / S A S
-    _clean = _re.sub(r'\bLTDA\b', '', _clean)             # quitar LTDA
-    _clean = _re.sub(r'\bSACI\b', '', _clean)             # quitar SACI
-    _clean = _re.sub(r'\s+', ' ', _clean).strip()         # colapsar espacios dobles
-    # Tomar solo la primera palabra clave significativa (>4 caracteres) para max elasticidad
-    _words = [w for w in _clean.split() if len(w) > 4]
-    _search_term = _words[0] if _words else _clean[:10]
-    safe_term = _search_term.replace("'", "''")
-
-    df_ids = pd.DataFrame()
-
-    # Intento 1: Igualdad exacta sin puntos usando upper()
-    with st.spinner("Rastreando cadena de custodia y NITs corporativos..."):
+    # ── EXTRACCIÓN DE CONTINGENCIA ROBUSTA ──
+    # Para evitar problemas con 'PRIXMASOL S.A.S.' y los puntos, limpiamos la cadena 
+    # quitando puntos y sufijos corporativos, buscando solo por la raíz del texto.
+    clean_name = proveedor_sel.replace(".", "").replace("S A S", "").replace("SAS", "").strip()
+    safe_clean_name = clean_name.replace("'", "''")
+    
+    with st.spinner("Indexando transacciones y llaves estructurales en Socrata..."):
+        # Buscamos de manera elástica en Socrata usando LIKE con la raíz limpia del nombre
         df_ids = soql_focal({
             "$select": "nit_proveedor, nombre_representante_legal, identificacion_representante_legal",
-            "$where": f"upper(proveedor_adjudicado) like '%{safe_term}%'",
+            "$where": f"upper(proveedor_adjudicado) like '%{safe_clean_name.upper()}%'",
             "$limit": "1"
         })
-
-    # Intento 2: Si falla, usar la segunda palabra clave
-    if df_ids.empty and len(_words) > 1:
-        safe_term2 = _words[1].replace("'", "''")
-        with st.spinner("Reintentando con termino alternativo..."):
+        
+    if df_ids.empty:
+        # Fallback de última instancia: si falla por el nombre limpio, buscamos de forma directa 
+        # batiendo minúsculas y mayúsculas con el término exacto de la fila seleccionada
+        safe_prov_raw = proveedor_sel.replace("'", "''")
+        with st.spinner("Reintentando con coincidencia exacta de fila..."):
             df_ids = soql_focal({
                 "$select": "nit_proveedor, nombre_representante_legal, identificacion_representante_legal",
-                "$where": f"upper(proveedor_adjudicado) like '%{safe_term2}%'",
+                "$where": f"upper(proveedor_adjudicado) = '{safe_prov_raw.upper()}'",
                 "$limit": "1"
             })
 
     if df_ids.empty:
-        st.error(f"❌ No se pudo recuperar el NIT para: {proveedor_sel}. Verifica que el nombre exista en el dataset del año seleccionado.")
+        st.error(f"❌ Error de comunicación con Socrata: No se encontró un NIT válido mapeado para: {proveedor_sel}")
         return
     else:
-        nit_prov_central = str(df_ids.iloc[0].get("nit_proveedor", "N/A"))
-        rep_legal_nom    = str(df_ids.iloc[0].get("nombre_representante_legal", "NO REGISTRADO")).upper()
-        nit_rep_central  = df_ids.iloc[0].get("identificacion_representante_legal", "N/A")
-
-        # Normalizar nulos del representante
-        if pd.isna(nit_rep_central) or str(nit_rep_central).strip() in ("", "N/A", "nan", "None"):
+        # Extraer variables analíticas con diccionarios de seguridad
+        nit_prov_central = df_ids.iloc[0].get("nit_proveedor", "N/A")
+        rep_legal_nom = str(df_ids.iloc[0].get("nombre_representante_legal", "NO REGISTRADO EN FILA")).upper()
+        nit_rep_central = df_ids.iloc[0].get("identificacion_representante_legal", "N/A")
+        
+        # Normalizar estados nulos o vacíos del ID del Representante
+        if pd.isna(nit_rep_central) or str(nit_rep_central).strip() == "" or nit_rep_central == "N/A":
             nit_rep_central = "N/A"
-        else:
-            nit_rep_central = str(nit_rep_central).strip()
 
-        # Definicion del pivote: preferimos cruzar por ID del representante; si no, por NIT empresa
+        # ── DEFINICIÓN DE LA CONDICIÓN DE CRUCE FORENSE (Pivote Tripartito) ──
         if nit_rep_central != "N/A":
-            where_malla  = f"identificacion_representante_legal = '{nit_rep_central}'"
-            id_raiz      = nit_rep_central
-            lbl_origen   = f"REP: {rep_legal_nom[:18]}..."
+            # Si hay cédula de representante, barremos toda la malla sociodemográfica (Carrusel)
+            where_malla = f"identificacion_representante_legal = '{nit_rep_central}'"
+            id_raiz = nit_rep_central
+            lbl_origen = f"REP: {rep_legal_nom[:15]}..."
             title_origen = f"Representante Legal:<br>{rep_legal_nom}<br>ID: {nit_rep_central}"
         else:
-            where_malla  = f"nit_proveedor = '{nit_prov_central}'"
-            id_raiz      = nit_prov_central
-            lbl_origen   = "CONTRATISTA PRINCIPAL"
-            title_origen = f"Proveedor: {proveedor_sel}<br>NIT: {nit_prov_central}"
+            # Si está ausente, forzamos el aislamiento de la red en torno al NIT de la empresa seleccionada
+            where_malla = f"nit_proveedor = '{nit_prov_central}'"
+            id_raiz = nit_prov_central
+            lbl_origen = f"PROV: {proveedor_sel[:15]}..."
+            title_origen = f"Proveedor:<br>{proveedor_sel}<br>NIT: {nit_prov_central}"
 
-        # =========================================================================
-        # B) CRUCE FORENSE: Buscar todas las empresas que comparten este Representante
-        # =========================================================================
-        with st.spinner("Construyendo matriz de relaciones financieras..."):
+        # C. CONSULTA DE ADYACENCIA COMPLETA (Malla y Dinero)
+        with st.spinner("Construyendo matriz relacional y flujos económicos..."):
             df_malla_total = soql_focal({
                 "$select": "upper(trim(proveedor_adjudicado)) AS proveedor_adjudicado, nit_proveedor, upper(trim(nombre_entidad)) AS nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
                 "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
