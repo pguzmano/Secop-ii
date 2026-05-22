@@ -731,26 +731,20 @@ def render_top_risk_panel(prov_df: pd.DataFrame):
             badge_col  = C['amber']
             badge_bord = 'rgba(245,158,11,.2)'
 
-        st.markdown(f"""
-        <div style='display:flex;align-items:center;gap:8px;padding:7px 0;
-                    border-bottom:1px solid {C['border']};'>
-            <div style='font-size:.75rem;font-weight:900;color:{badge_col};width:22px;'>#{i}</div>
-            <div style='flex:1;min-width:0;'>
-                <div style='font-size:.78rem;color:#fff;font-weight:600;
-                            overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'
-                     title='{row.proveedor}'>{row.proveedor[:45]}</div>
-                <div style='font-size:.68rem;color:{C['muted']};margin-top:2px;'>
-                    {ent_c} entidades · {format_b(val)} · Directa {pct_d*100:.0f}%
-                    {f"· 🕸️ Puente {bet:.2f}" if bet > 0.05 else ""}
-                </div>
-                <div style='width:{pct_bar}%;height:3px;background:linear-gradient(90deg,{badge_col},{C['purple']});
-                            border-radius:2px;margin-top:4px;'></div>
-            </div>
-            <div style='background:{badge_bg};border:1px solid {badge_bord};color:{badge_col};
-                        border-radius:6px;padding:2px 8px;font-size:.68rem;font-weight:700;
-                        flex-shrink:0;'>{score:.1f}</div>
-        </div>
-        """, unsafe_allow_html=True)
+        # Construir string condicional sin crear líneas en blanco
+        puente_html = f" · 🕸️ Puente {bet:.2f}" if bet > 0.05 else ""
+        
+        # Escribir HTML sin indentación para evitar que Markdown lo tome como bloque de código
+        html_str = f"""<div style='display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid {C['border']};'>
+<div style='font-size:.75rem;font-weight:900;color:{badge_col};width:22px;'>#{i}</div>
+<div style='flex:1;min-width:0;'>
+<div style='font-size:.78rem;color:#fff;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='{row.proveedor}'>{row.proveedor[:45]}</div>
+<div style='font-size:.68rem;color:{C['muted']};margin-top:2px;'>{ent_c} entidades · {format_b(val)} · Directa {pct_d*100:.0f}%{puente_html}</div>
+<div style='width:{pct_bar}%;height:3px;background:linear-gradient(90deg,{badge_col},{C['purple']});border-radius:2px;margin-top:4px;'></div>
+</div>
+<div style='background:{badge_bg};border:1px solid {badge_bord};color:{badge_col};border-radius:6px;padding:2px 8px;font-size:.68rem;font-weight:700;flex-shrink:0;'>{score:.1f}</div>
+</div>"""
+        st.markdown(html_str, unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
 
