@@ -1018,7 +1018,9 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     nit_rep_central = fila_origen.get("identificaci_n_representante_legal", fila_origen.get("identificacion_representante_legal", fila_origen.get("nit_representante_legal", "N/A")))
 
                 # Normalización de seguridad para NIT del Representante Legal
-                if pd.isna(nit_rep_central) or str(nit_rep_central).strip() == "" or nit_rep_central == "N/A":
+                nit_rep_str = str(nit_rep_central).strip().upper()
+                invalid_reps = ["", "N/A", "NAN", "NONE", "SIN DESCRIPCION", "SIN DESCRIPCIÓN", "0", "000000", "000000000", "NO DEFINIDO", "NO REPORTA", "NO APLICA"]
+                if pd.isna(nit_rep_central) or nit_rep_str in invalid_reps:
                     nit_rep_central = "N/A"
 
                 # Almacenamos la estructura en la sesión de forma segura
@@ -1180,10 +1182,13 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     label_prov = (nom_proveedor[:16] + "...") if len(nom_proveedor) > 16 else nom_proveedor
                     
                     net.add_node(fila["nit_proveedor"], label=label_prov, title=nom_proveedor, color="#4F8EF7", size=18, shape="dot")
-                    net.add_edge(id_raiz, fila["nit_proveedor"], color="#F43F5E", width=2, dash=True)
+                    # Arista Representante -> Empresa
+                    net.add_edge(id_raiz, fila["nit_proveedor"], color="#F43F5E", width=2, dash=True, title="Vínculo Societario / Representación Legal", arrows="to")
                     
                     net.add_node(fila["nit_entidad"], label=fila["nombre_entidad"][:16]+"...", title=fila["nombre_entidad"], color="#64748B", size=14, shape="triangle")
-                    net.add_edge(fila["nit_proveedor"], fila["nit_entidad"], color="#1A2336", width=grosor_arista)
+                    # Arista Empresa -> Entidad
+                    edge_title = f"Contratos: {fila['cant_contratos']} | Total: {format_b(fila['sum_valor'])}"
+                    net.add_edge(fila["nit_proveedor"], fila["nit_entidad"], color="#1A2336", width=grosor_arista, title=edge_title, arrows="to")
                 
                 path_html = os.path.join(TEMP_DIR, "temp_interactive_network.html")
                 net.save_graph(path_html)
