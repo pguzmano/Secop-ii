@@ -1005,22 +1005,40 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
     # A) Consulta relacional base: Extraer NITs de control del proveedor seleccionado
     # =========================================================================
     with st.spinner("Rastreando cadena de custodia y NITs corporativos..."):
+        # OPTIMIZACIÓN: Forzamos upper() en el WHERE de Socrata para que coincida 
+        # sin importar cómo esté digitado en el servidor de origen
         df_ids = soql_focal({
             "$select": "nit_proveedor, nombre_representante_legal, identificacion_representante_legal",
-            "$where": f"upper(trim(proveedor_adjudicado)) = '{safe_prov}'",
+            "$where": f"upper(proveedor_adjudicado) = '{safe_prov.upper()}'",
             "$limit": "1"
         })
 
     if df_ids.empty:
-        st.warning(f"⚠️ No se pudieron recuperar los identificadores de Socrata para: {proveedor_sel}")
+        # PLAN DE CONTINGENCIA B: Si por nombre sigue fallando (por un espacio oculto),
+        # intentamos buscar de forma parcial usando el operador LIKE
+        with st.spinner("Reintentando indexación por coincidencia parcial..."):
+            df_ids = soql_focal({
+                "$select": "nit_proveedor, nombre_representante_legal, identificacion_representante_legal",
+                "$where": f"upper(proveedor_adjudicado) like '%{safe_prov.upper()}%'",
+                "$limit": "1"
+            })
+
+    if df_ids.empty:
+        st.error(f"❌ Error crítico: No se encontró un NIT válido en Socrata para la entidad corporativa: {proveedor_sel}")
         return
     else:
         nit_prov_central = str(df_ids.iloc[0].get("nit_proveedor", "N/A"))
         rep_legal_nom    = str(df_ids.iloc[0].get("nombre_representante_legal", "NO REGISTRADO EN FILA")).upper()
-        nit_rep_central  = str(df_ids.iloc[0].get("identificacion_representante_legal", "N/A"))
+        nit_rep_central  = df_ids.iloc[0].get("identificacion_representante_legal", "N/A")
+
+        # Si el NIT del representante está ausente, usamos una cadena vacía para el control lógico
+        if pd.isna(nit_rep_central) or str(nit_rep_central).strip() == "" or nit_rep_central == "N/A" or nit_rep_central == "nan" or nit_rep_central == "None":
+            nit_rep_central = "N/A"
+        else:
+            nit_rep_central = str(nit_rep_central).strip()
 
         # Construcción de la condición lógica de rastreo forense (Cruce por NIT de Representante o NIT de Empresa)
-        if nit_rep_central != "N/A" and nit_rep_central.strip() != "" and nit_rep_central != "nan" and nit_rep_central != "None":
+        if nit_rep_central != "N/A":
             where_malla = f"identificacion_representante_legal = '{nit_rep_central}'"
             id_raiz = nit_rep_central
             lbl_origen = f"REP: {rep_legal_nom[:18]}..."
