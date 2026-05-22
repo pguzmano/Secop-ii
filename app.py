@@ -274,13 +274,16 @@ def get_kpis_modalidad(anio: int, dep_raw: str, mun_raw: str, actor_filter: str 
         conds.append(f"(nombre_entidad = '{safe_actor}' OR proveedor_adjudicado = '{safe_actor}')")
         
     df = soql_get({
-        "$select": "modalidad_de_contratacion, COUNT(*) AS contratos, SUM(valor_del_contrato) AS valor, COUNT(DISTINCT nit_entidad) AS entidades",
+        "$select": "modalidad_de_contratacion, tipo_de_contrato, COUNT(*) AS contratos, SUM(valor_del_contrato) AS valor, COUNT(DISTINCT nit_entidad) AS entidades",
         "$where":  " AND ".join(conds),
-        "$group":  "modalidad_de_contratacion",
+        "$group":  "modalidad_de_contratacion, tipo_de_contrato",
         "$order":  "valor DESC",
-        "$limit":  "20",
+        "$limit":  "100",
     })
     if not df.empty:
+        # Llenar valores nulos para evitar errores en el path del treemap
+        df["modalidad_de_contratacion"] = df["modalidad_de_contratacion"].fillna("No Especificada")
+        df["tipo_de_contrato"] = df["tipo_de_contrato"].fillna("No Especificado")
         df["valor"]     = pd.to_numeric(df["valor"],     errors="coerce").fillna(0).replace([float('inf'), float('-inf')], 0)
         df["contratos"] = pd.to_numeric(df["contratos"], errors="coerce").fillna(0)
         df["entidades"] = pd.to_numeric(df["entidades"], errors="coerce").fillna(0)
@@ -876,20 +879,34 @@ def render_kpis_modalidad(anio: int, dep_raw: str, mun_raw: str, dep_norm: str, 
         st.info("No hay datos de modalidades para el área seleccionada.")
         return
 
-    # Gráfico de Treemap
+    # Agrupar datos para la tabla resumen
+    df_tabla = df_mod.groupby("modalidad_de_contratacion", as_index=False).agg({
+        "valor": "sum",
+        "contratos": "sum",
+        "entidades": "sum"
+    }).sort_values("valor", ascending=False).head(10)
+    
+    df_tabla["participacion_pct"] = (df_tabla["valor"] / (df_tabla["valor"].sum() or 1)) * 100
+    df_tabla["ticket_promedio"]   = df_tabla["valor"] / df_tabla["contratos"].replace(0, 1)
+
+    # Gráfico de Treemap Dinámico (Drill-down)
     fig_tree = px.treemap(
-        df_mod, path=[px.Constant("Todas"), "modalidad_de_contratacion"], values="valor",
+        df_mod, path=[px.Constant("Todas"), "modalidad_de_contratacion", "tipo_de_contrato"], values="valor",
         color="valor", color_continuous_scale="Blues",
         custom_data=["contratos", "entidades", "ticket_promedio"]
     )
     fig_tree.update_traces(
-        hovertemplate="<b>%{label}</b><br>Presupuesto: %{value:$,.0f}<br>Contratos: %{customdata[0]}<br>Entidades: %{customdata[1]}<br>Ticket Promedio: %{customdata[2]:$,.0f}<extra></extra>"
+        hovertemplate="<b>%{label}</b><br>Presupuesto: %{value:$,.0f}<br>Contratos: %{customdata[0]}<br>Ticket Promedio: %{customdata[2]:$,.0f}<extra></extra>",
+        root_color="lightgrey"
     )
-    fig_tree.update_layout(margin=dict(t=10, l=10, r=10, b=10), height=300, paper_bgcolor=C["bg"])
+    fig_tree.update_layout(
+        paper_bgcolor=C["bg"], plot_bgcolor=C["bg"], font_color=C["text"],
+        margin=dict(l=0, r=0, t=20, b=0), height=450, coloraxis_showscale=False
+    )
     st.plotly_chart(fig_tree, use_container_width=True)
 
     # Tabla de Modalidades
-    df_disp = df_mod[["modalidad_de_contratacion", "valor", "participacion_pct", "contratos", "ticket_promedio", "entidades"]].copy()
+    df_disp = df_tabla[["modalidad_de_contratacion", "valor", "participacion_pct", "contratos", "ticket_promedio", "entidades"]].copy()
     df_disp["valor_fmt"] = df_disp["valor"].apply(fmt_b)
     df_disp["pct_fmt"] = df_disp["participacion_pct"].apply(lambda x: f"{x:.1f}%")
     df_disp["tk_fmt"] = df_disp["ticket_promedio"].apply(fmt_b)
