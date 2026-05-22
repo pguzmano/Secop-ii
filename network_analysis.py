@@ -924,11 +924,37 @@ def soql_focal(params: dict) -> pd.DataFrame:
                 time.sleep(1.5 * (attempt + 1))
                 continue
             return pd.DataFrame()
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return pd.DataFrame()
+
+def soql_get_procesos(params: dict) -> pd.DataFrame:
+    """Consulta al dataset de Procesos de Contratación (p6dx-8zbt)."""
+    API_PROCESOS = "https://www.datos.gov.co/resource/p6dx-8zbt.json"
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                API_PROCESOS, params=params, timeout=30,
+                headers={"Accept-Encoding": "gzip", "User-Agent": "SECOP-Forense-Procesos/2.0"}
+            )
+            if r.status_code == 500 and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            data = r.json()
+            return pd.DataFrame(data) if data else pd.DataFrame()
+        except requests.Timeout:
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return pd.DataFrame()
         except Exception:
             if attempt < 2:
                 time.sleep(1.5 * (attempt + 1))
                 continue
             return pd.DataFrame()
+
 
 
 def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
@@ -1236,3 +1262,73 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                 st.dataframe(df_detallado_disp, use_container_width=True, hide_index=True, key="tabla_auditoria_financiera")
             else:
                 st.info("No se reportaron transacciones financieras sueltas para la auditoría de este contratista.")
+
+            # ── INTEGRACIÓN VISUAL EN EL EXPEDIENTE DINÁMICO DEL CONTRATISTA (PROCESOS p6dx-8zbt) ──
+            nit_target = metadata.get("nit_proveedor")
+            if nit_target and nit_target != "N/A":
+                st.markdown("<br><hr style='border-top: 1px dashed #1A2336; margin:20px 0;'>", unsafe_allow_html=True)
+                st.markdown("<h4>📊 Auditoría Forense de Competencia y Ofertas</h4>", unsafe_allow_html=True)
+                
+                with st.spinner("Consultando nivel de competencia en licitaciones..."):
+                    df_ofertas_proceso = soql_get_procesos({
+                        "$select": "nombre_entidad, objeto_a_contratar, referencia_del_proceso, numero_de_las_ofertas_recibidas, procedimiento, base_legal, precio_base",
+                        "$where": f"nit_proveedor = '{nit_target}' AND date_extract_y(fecha_de_firma) = {anio}",
+                        "$order": "numero_de_las_ofertas_recibidas ASC",
+                        "$limit": "100"
+                    })
+                
+                if df_ofertas_proceso.empty:
+                    st.info("No se registran métricas de competencia indexadas para este NIT en el dataset de Procesos.")
+                else:
+                    df_ofertas_proceso["numero_de_las_ofertas_recibidas"] = pd.to_numeric(df_ofertas_proceso["numero_de_las_ofertas_recibidas"], errors="coerce").fillna(1)
+                    df_ofertas_proceso["precio_base"] = pd.to_numeric(df_ofertas_proceso["precio_base"], errors="coerce").fillna(0)
+                    
+                    # Filtramos procesos de régimen competitivo (ignorando contratación directa pura donde ofertas siempre es 1 por definición)
+                    # Pero en SECOP a veces la contratación directa registra 1 oferta. Si el usuario quiere analizar fraude, 
+                    # debemos mirar también modalidades que debieron ser competitivas pero tuvieron 1 oferta.
+                    procesos_monopolio = df_ofertas_proceso[df_ofertas_proceso["numero_de_las_ofertas_recibidas"] == 1]
+                    pct_proponente_unico = (len(procesos_monopolio) / len(df_ofertas_proceso)) * 100
+                    
+                    presupuesto_sin_competencia = procesos_monopolio["precio_base"].sum()
+                    
+                    col_m1, col_m2, col_m3 = st.columns(3)
+                    with col_m1:
+                        st.metric(
+                            label="Promedio de Ofertas en Adjudicaciones", 
+                            value=f"{df_ofertas_proceso['numero_de_las_ofertas_recibidas'].mean():.1f} Ofertas"
+                        )
+                    with col_m2:
+                        color_risk = "inverse" if pct_proponente_unico > 50 else "normal"
+                        st.metric(
+                            label="Índice Proponente Único (Ofertas = 1)", 
+                            value=f"{pct_proponente_unico:.1f}%",
+                            delta="Riesgo de Pliego Sastre" if pct_proponente_unico > 50 else "Normal",
+                            delta_color=color_risk
+                        )
+                    with col_m3:
+                        st.metric(
+                            label="Adjudicado Sin Competencia", 
+                            value=format_b(presupuesto_sin_competencia),
+                            delta="Foco Veeduría" if presupuesto_sin_competencia > 0 else "Competitivo",
+                            delta_color="inverse" if presupuesto_sin_competencia > 0 else "normal"
+                        )
+                        
+                    st.markdown("<div style='font-size:0.75rem; font-weight:700; color:#fff; text-transform:uppercase;'>📋 Análisis de Concurrencia por Proceso Convocado</div>", unsafe_allow_html=True)
+                    
+                    df_view_ofertas = pd.DataFrame({
+                        "Entidad Compradora": df_ofertas_proceso["nombre_entidad"].str.title(),
+                        "Referencia Proceso": df_ofertas_proceso["referencia_del_proceso"],
+                        "Modalidad": df_ofertas_proceso["procedimiento"],
+                        "Base Legal": df_ofertas_proceso["base_legal"].fillna("N/A"),
+                        "Precio Base": df_ofertas_proceso["precio_base"].apply(format_b),
+                        "Ofertas Presentadas": df_ofertas_proceso["numero_de_las_ofertas_recibidas"].astype(int)
+                    })
+                    
+                    st.dataframe(
+                        df_view_ofertas.style.map(
+                            lambda x: "background-color: rgba(244,63,94,0.15); color: #F43F5E;" if x == 1 else "", 
+                            subset=["Ofertas Presentadas"]
+                        ),
+                        use_container_width=True,
+                        hide_index=True
+                    )
