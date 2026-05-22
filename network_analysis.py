@@ -87,51 +87,43 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
         safe_mun = mun_raw.replace("'", "''")
         conds.append(f"upper(ciudad) = '{safe_mun}'")
 
-
-    # 1. Top por Valor (captura los mega-contratos)
-    params_valor = {
-        "$select": "upper(trim(proveedor_adjudicado)) AS proveedor_adjudicado, upper(trim(nombre_entidad)) AS nombre_entidad, upper(trim(modalidad_de_contratacion)) AS modalidad_de_contratacion, upper(trim(tipo_de_contrato)) AS tipo_de_contrato, COUNT(*) AS contratos, SUM(valor_del_contrato) AS valor_total",
+    # ⬇️ SoQL con GROUP BY en el servidor → llegan ~150 filas en vez de 1000
+    params = {
+        "$select": (
+            "upper(trim(proveedor_adjudicado)) AS proveedor_adjudicado, "
+            "upper(trim(nombre_entidad)) AS nombre_entidad, "
+            "upper(trim(modalidad_de_contratacion)) AS modalidad_de_contratacion, "
+            "upper(trim(tipo_de_contrato)) AS tipo_de_contrato, "
+            "SUM(valor_del_contrato) AS valor_total, "
+            "COUNT(*) AS contratos"
+        ),
         "$where":  " AND ".join(conds),
         "$group":  "upper(trim(proveedor_adjudicado)), upper(trim(nombre_entidad)), upper(trim(modalidad_de_contratacion)), upper(trim(tipo_de_contrato))",
         "$order":  "SUM(valor_del_contrato) DESC",
-        "$limit":  "3000"
-    }
-
-    # 2. Top por Volumen/Frecuencia (captura carruseles y personas naturales con muchos contratos pequeños)
-    params_frecuencia = {
-        "$select": "upper(trim(proveedor_adjudicado)) AS proveedor_adjudicado, upper(trim(nombre_entidad)) AS nombre_entidad, upper(trim(modalidad_de_contratacion)) AS modalidad_de_contratacion, upper(trim(tipo_de_contrato)) AS tipo_de_contrato, COUNT(*) AS contratos, SUM(valor_del_contrato) AS valor_total",
-        "$where":  " AND ".join(conds),
-        "$group":  "upper(trim(proveedor_adjudicado)), upper(trim(nombre_entidad)), upper(trim(modalidad_de_contratacion)), upper(trim(tipo_de_contrato))",
-        "$order":  "COUNT(*) DESC",
-        "$limit":  "3000"
+        "$limit":  "2000"   # 2000 aristas agregadas, no filas crudas
     }
 
     try:
-        # Petición 1: Por Valor
-        r_val = requests.get(API_BASE, params=params_valor, timeout=API_TIMEOUT)
-        r_val.raise_for_status()
-        data_val = r_val.json()
+        r = requests.get(API_BASE, params=params, timeout=API_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
 
-        # Petición 2: Por Frecuencia
-        r_frec = requests.get(API_BASE, params=params_frecuencia, timeout=API_TIMEOUT)
-        r_frec.raise_for_status()
-        data_frec = r_frec.json()
-
-        if not data_val and not data_frec:
+        if not data:
             return pd.DataFrame()
 
-        df_val = pd.DataFrame(data_val)
-        df_frec = pd.DataFrame(data_frec)
-
-        # Unir y eliminar duplicados (por si una arista es top valor y top frecuencia a la vez)
-        df = pd.concat([df_val, df_frec], ignore_index=True)
-        if not df.empty:
-            df = df.drop_duplicates(subset=['proveedor_adjudicado', 'nombre_entidad', 'modalidad_de_contratacion', 'tipo_de_contrato'])
-
+        df = pd.DataFrame(data)
         df['valor_total'] = pd.to_numeric(df['valor_total'], errors='coerce').fillna(0)
         df['contratos']   = pd.to_numeric(df['contratos'],   errors='coerce').fillna(0).astype(int)
 
-        print(f"[get_network_raw_data] {len(df)} aristas combinadas (Valor + Frecuencia)")
+        # Renombrar columnas para compatibilidad con el pipeline
+        df = df.rename(columns={
+            'proveedor_adjudicado':       'proveedor_adjudicado',
+            'nombre_entidad':             'nombre_entidad',
+            'modalidad_de_contratacion':  'modalidad_de_contratacion',
+            'tipo_de_contrato':           'tipo_de_contrato',
+        })
+
+        print(f"[get_network_raw_data] {len(df)} aristas pre-agregadas desde API")
         return df
 
     except requests.Timeout:
@@ -903,57 +895,452 @@ def render_network_tab(anio: int, dep_raw: str, mun_raw: str):
     components.html(html_graph, height=600, scrolling=False)
     st.markdown("</div><br>", unsafe_allow_html=True)
 
-    # ── Tablas Forenses ───────────────────────────────────────────────────
-    col_a, col_b = st.columns([1, 1.5])
+    # ── Tabla Maestra Forense + Expediente Dinámico ───────────────────────
+    render_forensic_master_table(prov_df, anio, dep_raw, mun_raw)
 
-    with col_a:
-        st.markdown(f"""
-        <h3 style='font-size:1rem;font-weight:700;color:#fff;margin:0 0 12px;'>
-            🚨 Alertas Forenses
-        </h3>""", unsafe_allow_html=True)
 
-        df_alertas = generate_alerts(prov_df, edges_df)
-
-        if not df_alertas.empty:
-            event_alertas = st.dataframe(
-                df_alertas,
-                use_container_width=True,
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="tabla_alertas_interactiva"
+# =============================================================================
+# MODULO FORENSE: Tabla Maestra + Expediente Contractual Dinamico
+# Equipo: Analista Forense / Cientifico de Datos / Ingeniero de Datos / UX
+# =============================================================================
+def soql_focal(params: dict) -> pd.DataFrame:
+    """Consulta puntual al API Socrata — para el expediente dinamico.
+    Independiente de app.py para evitar importaciones circulares."""
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                API_BASE, params=params, timeout=30,
+                headers={"Accept-Encoding": "gzip", "User-Agent": "SECOP-Forense/2.0"}
             )
-            if event_alertas and event_alertas.selection and event_alertas.selection.rows:
-                idx_sel = event_alertas.selection.rows[0]
-                actor_alerta = df_alertas.iloc[idx_sel]["Actor"]
-                if "↔" in actor_alerta:
-                    actor_alerta = actor_alerta.split("↔")[0].strip()
-                if st.session_state.get("actor_seleccionado") != actor_alerta:
-                    st.session_state["actor_seleccionado"] = actor_alerta
-                    st.session_state["select_actor_raw"]  = actor_alerta
-                    st.rerun()
+            if r.status_code == 500 and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            data = r.json()
+            return pd.DataFrame(data) if data else pd.DataFrame()
+        except requests.Timeout:
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return pd.DataFrame()
+        except Exception:
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return pd.DataFrame()
+
+
+def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
+                                  dep_raw: str, mun_raw: str):
+    """Tabla Maestra Unificada + Expediente Dinamico:
+       Rep. Legal -> Malla Corporativa -> Grafo focalizado -> Auditoria financiera."""
+
+    # --- Encabezado ---
+    st.markdown(
+        "<div style='margin:28px 0 12px;'>"
+        "<h3 style='font-size:1.1rem;font-weight:900;color:#fff;margin:0 0 4px;'>"
+        "Radar Forense de Contratistas &mdash; Tabla Maestra de Riesgo"
+        "</h3>"
+        "<div style='font-size:.75rem;color:#64748B;'>"
+        "Proveedores ordenados por Score Forense. "
+        "Haz clic en una fila para desplegar su Expediente de Auditoria."
+        "</div></div>",
+        unsafe_allow_html=True
+    )
+
+    if prov_df.empty:
+        st.info("No hay datos de contratistas disponibles para el territorio seleccionado.")
+        return
+
+    # --- Preparar Tabla Maestra ---
+    cols = [
+        'proveedor', 'nivel_riesgo', 'entidades_distintas',
+        'contratos_totales', 'valor_total', 'pct_directa',
+        'centralidad_intermediacion', 'score_forense'
+    ]
+    df_m = prov_df[cols].copy().sort_values('score_forense', ascending=False)
+    df_m['pct_directa']                = (df_m['pct_directa'] * 100).round(1)
+    df_m['valor_total']                = df_m['valor_total'].apply(format_b)
+    df_m['centralidad_intermediacion'] = df_m['centralidad_intermediacion'].round(3)
+    df_m.rename(columns={
+        'proveedor':                  'Contratista / Proveedor',
+        'nivel_riesgo':               'Riesgo',
+        'entidades_distintas':        'Entidades',
+        'contratos_totales':          'Contratos',
+        'valor_total':                'Monto Total',
+        'pct_directa':                '% Directa',
+        'centralidad_intermediacion': 'Centralidad (Puente)',
+        'score_forense':              'Score Forense',
+    }, inplace=True)
+
+    evento = st.dataframe(
+        df_m,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="tabla_maestra_forense"
+    )
+
+    # --- Si no hay seleccion, salir ---
+    if not (evento and evento.selection and evento.selection.rows):
+        return
+
+    idx_fila      = evento.selection.rows[0]
+    proveedor_sel = df_m.iloc[idx_fila]['Contratista / Proveedor']
+    safe_prov     = proveedor_sel.replace("'", "''")
+
+    # Separador visual
+    st.markdown("<hr style='border-top:1px dashed #1A2336;margin:24px 0;'>",
+                unsafe_allow_html=True)
+    st.markdown(
+        "<h4 style='font-size:1rem;font-weight:900;color:#fff;margin:0 0 16px;'>"
+        "Expediente de Auditoria: "
+        f"<span style='color:{C['blue']};'>{proveedor_sel}</span>"
+        "</h4>",
+        unsafe_allow_html=True
+    )
+
+    # =========================================================================
+    # A) REPRESENTANTE LEGAL
+    # =========================================================================
+    with st.spinner("Consultando Representante Legal..."):
+        df_rep = soql_focal({
+            "$select": "representante_legal, nit_representante_legal",
+            "$where":  (
+                f"upper(trim(proveedor_adjudicado)) = '{safe_prov}'"
+                " AND representante_legal IS NOT NULL"
+            ),
+            "$limit": "1"
+        })
+
+    rep_legal = "NO REGISTRADO"
+    nit_rep   = "N/A"
+    if not df_rep.empty:
+        rep_legal = str(df_rep.iloc[0].get("representante_legal", "NO REGISTRADO")).strip().upper()
+        nit_rep   = str(df_rep.iloc[0].get("nit_representante_legal", "N/A")).strip()
+
+    # =========================================================================
+    # B) MALLA CORPORATIVA (empresas que comparten el mismo NIT de representante)
+    # =========================================================================
+    df_mallas           = pd.DataFrame()
+    empresas_vinculadas = [proveedor_sel]
+
+    if nit_rep not in ("N/A", "", "nan", "None"):
+        safe_nit = nit_rep.replace("'", "''")
+        with st.spinner("Rastreando malla empresarial por NIT..."):
+            df_mallas = soql_focal({
+                "$select": (
+                    "upper(trim(proveedor_adjudicado)) AS empresa,"
+                    "upper(trim(nombre_entidad)) AS entidad,"
+                    "SUM(valor_del_contrato) AS valor_total,"
+                    "COUNT(*) AS contratos"
+                ),
+                "$where": (
+                    f"nit_representante_legal = '{safe_nit}'"
+                    f" AND date_extract_y(fecha_de_firma) = {anio}"
+                ),
+                "$group": (
+                    "upper(trim(proveedor_adjudicado)),"
+                    "upper(trim(nombre_entidad))"
+                ),
+                "$limit": "200"
+            })
+        if not df_mallas.empty:
+            empresas_vinculadas = df_mallas['empresa'].unique().tolist()
+
+    num_empresas = len(empresas_vinculadas)
+
+    # =========================================================================
+    # C) TARJETAS KPI: Rep. Legal + Malla + Entidades
+    # =========================================================================
+    col_rep1, col_rep2, col_rep3 = st.columns([2.5, 1, 1])
+
+    with col_rep1:
+        st.markdown(
+            f"<div style='background:{C['card']};border:1px solid {C['border']};"
+            "border-radius:10px;padding:14px;'>"
+            f"<div style='font-size:.62rem;color:{C['muted']};font-weight:700;"
+            "letter-spacing:1px;text-transform:uppercase;'>Representante Legal Oficial</div>"
+            f"<div style='font-size:1rem;font-weight:700;color:#fff;margin-top:4px;'>{rep_legal}</div>"
+            f"<div style='font-size:.72rem;color:{C['muted']};margin-top:3px;'>"
+            f"NIT / Cedula: <b style='color:{C['text']};'>{nit_rep}</b></div>"
+            "</div>",
+            unsafe_allow_html=True
+        )
+
+    with col_rep2:
+        color_e = C['green'] if num_empresas == 1 else C['red']
+        bg_e    = "rgba(34,197,94,.07)" if num_empresas == 1 else "rgba(244,63,94,.07)"
+        bord_e  = "rgba(34,197,94,.25)" if num_empresas == 1 else "rgba(244,63,94,.25)"
+        label_e = "Unica" if num_empresas == 1 else "ALERTA: Malla"
+        st.markdown(
+            f"<div style='background:{bg_e};border:1px solid {bord_e};"
+            "border-radius:10px;padding:14px;text-align:center;'>"
+            f"<div style='font-size:.62rem;color:{color_e};font-weight:700;"
+            "letter-spacing:1px;text-transform:uppercase;'>Empresas con este REP</div>"
+            f"<div style='font-size:1.8rem;font-weight:900;color:{color_e};"
+            f"line-height:1.1;margin-top:4px;'>{num_empresas}</div>"
+            f"<div style='font-size:.65rem;color:{color_e};margin-top:4px;"
+            f"font-weight:700;'>{label_e}</div>"
+            "</div>",
+            unsafe_allow_html=True
+        )
+
+    with col_rep3:
+        ent_vals = prov_df[prov_df['proveedor'] == proveedor_sel]['entidades_distintas'].values
+        n_ent    = int(ent_vals[0]) if len(ent_vals) else 1
+        color_ent = C['amber'] if n_ent > 2 else C['green']
+        bg_ent    = "rgba(245,158,11,.07)" if n_ent > 2 else "rgba(34,197,94,.07)"
+        bord_ent  = "rgba(245,158,11,.25)" if n_ent > 2 else "rgba(34,197,94,.25)"
+        label_ent = "Multi-entidad" if n_ent > 2 else "Localizado"
+        st.markdown(
+            f"<div style='background:{bg_ent};border:1px solid {bord_ent};"
+            "border-radius:10px;padding:14px;text-align:center;'>"
+            f"<div style='font-size:.62rem;color:{color_ent};font-weight:700;"
+            "letter-spacing:1px;text-transform:uppercase;'>Entidades Publicas</div>"
+            f"<div style='font-size:1.8rem;font-weight:900;color:{color_ent};"
+            f"line-height:1.1;margin-top:4px;'>{n_ent}</div>"
+            f"<div style='font-size:.65rem;color:{color_ent};margin-top:4px;"
+            f"font-weight:700;'>{label_ent}</div>"
+            "</div>",
+            unsafe_allow_html=True
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # =========================================================================
+    # D) GRAFO FOCALIZADO DE MALLA CORPORATIVA (solo si hay carrusel detectado)
+    # =========================================================================
+    if num_empresas > 1 and not df_mallas.empty:
+        df_mallas['valor_total'] = pd.to_numeric(
+            df_mallas['valor_total'], errors='coerce').fillna(0)
+        df_mallas['contratos']   = pd.to_numeric(
+            df_mallas['contratos'], errors='coerce').fillna(0).astype(int)
+
+        st.markdown(
+            "<div style='background:rgba(244,63,94,.06);border:1px solid rgba(244,63,94,.25);"
+            "border-radius:10px;padding:10px 14px;margin-bottom:10px;'>"
+            f"<span style='font-size:.72rem;font-weight:700;color:{C['red']};"
+            "text-transform:uppercase;letter-spacing:1px;'>"
+            "Grafo Relacional de Malla Corporativa &mdash; Posible Carrusel"
+            "</span>"
+            f"<div style='font-size:.68rem;color:{C['muted']};margin-top:2px;'>"
+            "Rojo = Representante Legal &nbsp;&bull;&nbsp; "
+            "Azul = Empresas vinculadas &nbsp;&bull;&nbsp; "
+            "Gris = Entidades Publicas</div>"
+            "</div>",
+            unsafe_allow_html=True
+        )
+
+        net_focal = Network(
+            height="320px", width="100%",
+            bgcolor=C['bg'], font_color=C['text'],
+            directed=False
+        )
+        net_focal.barnes_hut(
+            gravity=-1800, central_gravity=0.4,
+            spring_length=80, spring_strength=0.05
+        )
+
+        # Nodo central: Representante Legal
+        rep_label_short = rep_legal[:22] + ("..." if len(rep_legal) > 22 else "")
+        net_focal.add_node(
+            nit_rep,
+            label=rep_label_short,
+            title="REP LEGAL: " + rep_legal + "<br>NIT: " + nit_rep,
+            color={"background": C['red'], "border": "#fff",
+                   "highlight": {"background": "#FF6B6B", "border": "#fff"}},
+            size=28, shape="diamond",
+            font={"size": 11, "color": "#fff", "bold": True}
+        )
+
+        empresas_vistas  = set()
+        entidades_vistas = set()
+
+        for _, row_m in df_mallas.iterrows():
+            emp = str(row_m['empresa'])
+            ent = str(row_m['entidad'])
+            val = float(row_m['valor_total'])
+            cnt = int(row_m['contratos'])
+
+            # Nodo Empresa (2 nivel - azul / rojo si es el seleccionado)
+            if emp not in empresas_vistas:
+                emp_label_s = emp[:20] + ("..." if len(emp) > 20 else "")
+                is_sel      = (emp == proveedor_sel)
+                net_focal.add_node(
+                    emp,
+                    label=emp_label_s,
+                    title="EMPRESA: " + emp + "<br>Contratos: " + str(cnt) + "<br>Valor: " + format_b(val),
+                    color={
+                        "background": C['red'] if is_sel else C['blue'],
+                        "border": "#fff" if is_sel else C['blue'],
+                        "highlight": {"background": C['red'] if is_sel else "#7EB3FF", "border": "#fff"}
+                    },
+                    size=18 if is_sel else 14,
+                    shape="dot",
+                    font={"size": 10, "color": "#fff"}
+                )
+                net_focal.add_edge(
+                    nit_rep, emp,
+                    color={"color": C['red'], "opacity": 0.8},
+                    width=2,
+                    title="REP firma por " + emp
+                )
+                empresas_vistas.add(emp)
+
+            # Nodo Entidad (3er nivel - gris oscuro)
+            ent_id = "E__" + ent
+            if ent_id not in entidades_vistas:
+                ent_label_s = ent[:20] + ("..." if len(ent) > 20 else "")
+                net_focal.add_node(
+                    ent_id,
+                    label=ent_label_s,
+                    title="ENTIDAD PUB: " + ent + "<br>Contratos: " + str(cnt) + "<br>Valor: " + format_b(val),
+                    color={
+                        "background": "#1E3A5F",
+                        "border": C['border'],
+                        "highlight": {"background": "#2A5080", "border": C['blue']}
+                    },
+                    size=12, shape="square",
+                    font={"size": 9, "color": C['muted']}
+                )
+                entidades_vistas.add(ent_id)
+
+            net_focal.add_edge(
+                emp, ent_id,
+                color={"color": C['border'], "opacity": 0.6},
+                width=max(1, min(cnt // 2, 5)),
+                title=str(cnt) + " contratos | " + format_b(val)
+            )
+
+        # Renderizar grafo focalizado
+        try:
+            html_focal = net_focal.generate_html()
+            st.markdown(
+                f"<div style='border:1px solid {C['border']};border-radius:10px;"
+                "overflow:hidden;margin-bottom:16px;'>",
+                unsafe_allow_html=True
+            )
+            components.html(html_focal, height=330, scrolling=False)
+            st.markdown("</div>", unsafe_allow_html=True)
+        except Exception as e_graf:
+            st.warning(f"No se pudo renderizar el grafo focalizado: {e_graf}")
+
+    # =========================================================================
+    # E) AUDITORIA FINANCIERA: Historial detallado de contratos
+    # =========================================================================
+    st.markdown(
+        "<div style='font-size:.75rem;font-weight:700;color:#fff;"
+        "text-transform:uppercase;margin:20px 0 8px;letter-spacing:.5px;'>"
+        "Historial Detallado de Procesos y Estados Financieros"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+    with st.spinner("Cargando transacciones financieras..."):
+        df_contratos = soql_focal({
+            "$select": (
+                "nombre_entidad, valor_del_contrato, fecha_de_firma,"
+                "fecha_de_inicio, fecha_fin, estado_del_contrato,"
+                "tipo_de_contrato, modalidad_de_contratacion,"
+                "valor_pago_adelantado, valor_amortizado, valor_pendiente"
+            ),
+            "$where": (
+                f"date_extract_y(fecha_de_firma) = {anio}"
+                f" AND upper(trim(proveedor_adjudicado)) = '{safe_prov}'"
+            ),
+            "$order": "valor_del_contrato DESC",
+            "$limit": "200"
+        })
+
+    if df_contratos.empty:
+        st.warning("No se encontraron registros financieros detallados para este contratista.")
+        return
+
+    # Procesamiento numerico
+    for col_num in ['valor_del_contrato', 'valor_pago_adelantado',
+                    'valor_amortizado', 'valor_pendiente']:
+        if col_num in df_contratos.columns:
+            df_contratos[col_num] = pd.to_numeric(
+                df_contratos[col_num], errors='coerce').fillna(0)
         else:
-            st.success("No se detectaron patrones anómalos críticos.", icon="✅")
+            df_contratos[col_num] = 0.0
 
-    with col_b:
-        st.markdown(f"""
-        <h3 style='font-size:1rem;font-weight:700;color:{C['purple']};margin:0 0 12px;'>
-            📊 Tabla Forense de Riesgo (Score + Centralidad)
-        </h3>""", unsafe_allow_html=True)
+    # Limpieza de fechas (remover timestamps de Socrata)
+    for col_fecha in ['fecha_de_firma', 'fecha_de_inicio', 'fecha_fin']:
+        if col_fecha in df_contratos.columns:
+            df_contratos[col_fecha] = (
+                df_contratos[col_fecha].astype(str).str[:10]
+                .str.replace('T', '', regex=False)
+            )
 
-        cols_show = ['proveedor', 'entidades_distintas', 'contratos_totales',
-                     'valor_total', 'pct_directa', 'centralidad_intermediacion', 'score_forense']
-        t_final = prov_df[cols_show].copy()
-        t_final['pct_directa'] = (t_final['pct_directa'] * 100).round(1).astype(str) + "%"
-        t_final['valor_total'] = t_final['valor_total'].apply(format_b)
-        t_final['centralidad_intermediacion'] = t_final['centralidad_intermediacion'].round(3)
-        t_final.rename(columns={
-            "proveedor": "Proveedor",
-            "entidades_distintas": "Entidades",
-            "contratos_totales": "Contratos",
-            "valor_total": "Valor Total",
-            "pct_directa": "% Directa",
-            "centralidad_intermediacion": "Centralidad (Puente)",
-            "score_forense": "Score Forense"
-        }, inplace=True)
-        st.dataframe(t_final, use_container_width=True, hide_index=True)
+    # Iconos de estado
+    def estado_icon(e):
+        e_up = str(e).upper()
+        if 'EJEC'  in e_up: return "Ejecutando"
+        if 'LIQU'  in e_up: return "Liquidado"
+        if 'TERM'  in e_up: return "Terminado"
+        if 'SUSP'  in e_up: return "Suspendido"
+        return str(e).title()
+
+    mod_col = df_contratos.get(
+        'modalidad_de_contratacion',
+        pd.Series(['—'] * len(df_contratos))
+    ).fillna('—')
+
+    df_disp = pd.DataFrame({
+        "Entidad Contratante": df_contratos['nombre_entidad'].fillna('—'),
+        "Modalidad":           mod_col,
+        "Tipo":                df_contratos['tipo_de_contrato'].fillna('—'),
+        "Estado":              df_contratos['estado_del_contrato'].fillna('—').apply(estado_icon),
+        "Cuantia":             df_contratos['valor_del_contrato'].apply(format_b),
+        "Firma":               df_contratos['fecha_de_firma'],
+        "Inicio":              df_contratos['fecha_de_inicio'],
+        "Fin":                 df_contratos['fecha_fin'],
+        "Anticipo":            df_contratos['valor_pago_adelantado'].apply(format_b),
+        "Amortizado":          df_contratos['valor_amortizado'].apply(format_b),
+        "Saldo Pendiente":     df_contratos['valor_pendiente'].apply(format_b),
+    })
+
+    # KPIs rapidos del expediente financiero
+    total_val   = df_contratos['valor_del_contrato'].sum()
+    total_antic = df_contratos['valor_pago_adelantado'].sum()
+    total_pend  = df_contratos['valor_pendiente'].sum()
+    total_cnt   = len(df_contratos)
+    pct_pend    = (total_pend / total_val * 100) if total_val > 0 else 0
+
+    k1, k2, k3, k4 = st.columns(4)
+    for col_kpi, label, valor, alerta in [
+        (k1, "Contratos",       str(total_cnt),       False),
+        (k2, "Monto Total",     format_b(total_val),  False),
+        (k3, "Anticipo Total",  format_b(total_antic), total_antic > 0),
+        (k4, "Saldo Pendiente", format_b(total_pend),  pct_pend > 30),
+    ]:
+        bg_c  = "rgba(244,63,94,.07)" if alerta else C['card']
+        brd_c = "rgba(244,63,94,.3)"  if alerta else C['border']
+        col_c = C['red'] if alerta else C['text']
+        col_kpi.markdown(
+            f"<div style='background:{bg_c};border:1px solid {brd_c};"
+            "border-radius:8px;padding:10px 12px;margin-bottom:10px;'>"
+            f"<div style='font-size:.62rem;color:{C['muted']};font-weight:700;"
+            f"text-transform:uppercase;'>{label}</div>"
+            f"<div style='font-size:.95rem;font-weight:800;color:{col_c};"
+            f"margin-top:4px;'>{valor}</div>"
+            "</div>",
+            unsafe_allow_html=True
+        )
+
+    if pct_pend > 30:
+        st.markdown(
+            f"<div style='background:rgba(244,63,94,.08);border:1px solid rgba(244,63,94,.3);"
+            "border-radius:8px;padding:8px 12px;margin-bottom:10px;"
+            f"font-size:.75rem;color:{C['red']};'>"
+            f"<b>ALERTA FINANCIERA:</b> El {pct_pend:.1f}% del monto total "
+            "sigue pendiente de pago/ejecucion. Revisar contratos liquidados con saldos abiertos."
+            "</div>",
+            unsafe_allow_html=True
+        )
+
+    st.dataframe(df_disp, use_container_width=True, hide_index=True,
+                 key="tabla_auditoria_financiera")
