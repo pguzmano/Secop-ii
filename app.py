@@ -658,8 +658,9 @@ def render_mapa_departamentos(anio: int):
         if len(cd) >= 2:
             dep_norm_click = cd[0]   # para display y GeoJSON
             dep_raw_click  = cd[1]   # para WHERE en API (con acentos)
-            set_dep(dep_norm=dep_norm_click, dep_raw=dep_raw_click)
-            st.rerun()
+            if st.session_state.get("dep_norm") != dep_norm_click:
+                set_dep(dep_norm=dep_norm_click, dep_raw=dep_raw_click)
+                st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -747,8 +748,9 @@ def render_mapa_municipios(anio: int, dep_norm: str, dep_raw: str):
         if len(cd) >= 2:
             mun_norm_click = cd[0]   # para display y GeoJSON
             mun_raw_click  = cd[1]   # para WHERE en API (con acentos)
-            set_mun(mun_norm=mun_norm_click, mun_raw=mun_raw_click)
-            st.rerun()
+            if st.session_state.get("mun_norm") != mun_norm_click:
+                set_mun(mun_norm=mun_norm_click, mun_raw=mun_raw_click)
+                st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1143,10 +1145,9 @@ def main():
         # ── Tabla entidades y proveedores (solo al seleccionar municipio) ─────────
         if mun_raw:
             render_tablas_municipio(anio, mun_raw=mun_raw, mun_norm=mun_norm)
-
     with tab_red:
         render_network_tab(anio, dep_raw, mun_raw)
 
-
 if __name__ == "__main__":
     main()
+
