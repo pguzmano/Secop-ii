@@ -1045,7 +1045,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                 with st.spinner("Construyendo matriz relacional y buscando transacciones..."):
                     # Consulta B: Malla relacional
                     df_malla_api = soql_focal({
-                        "$select": "proveedor_adjudicado, documento_proveedor AS nit_proveedor, nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
+                        "$select": "proveedor_adjudicado, documento_proveedor AS nit_proveedor, MAX(nombre_representante_legal) AS rep_legal_nombre, nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
                         "$where": f"{where_malla} AND date_extract_y(fecha_de_firma) = {anio}",
                         "$group": "proveedor_adjudicado, documento_proveedor, nombre_entidad, nit_entidad",
                         "$limit": "250"
@@ -1164,7 +1164,14 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                 
                 for _, fila in df_malla_total.iterrows():
                     grosor_arista = max(1, math.log(fila["sum_valor"] + 1) / 3.5) if fila["sum_valor"] > 0 else 1
-                    net.add_node(fila["nit_proveedor"], label=fila["proveedor_adjudicado"][:16]+"...", title=fila["proveedor_adjudicado"], color="#4F8EF7", size=18, shape="dot")
+                    
+                    nom_proveedor = str(fila.get("proveedor_adjudicado", "Desconocido"))
+                    if nom_proveedor.isdigit() and "rep_legal_nombre" in fila and pd.notna(fila["rep_legal_nombre"]):
+                        nom_proveedor = str(fila["rep_legal_nombre"]).upper()
+                        
+                    label_prov = (nom_proveedor[:16] + "...") if len(nom_proveedor) > 16 else nom_proveedor
+                    
+                    net.add_node(fila["nit_proveedor"], label=label_prov, title=nom_proveedor, color="#4F8EF7", size=18, shape="dot")
                     net.add_edge(id_raiz, fila["nit_proveedor"], color="#F43F5E", width=2, dash=True)
                     
                     net.add_node(fila["nit_entidad"], label=fila["nombre_entidad"][:16]+"...", title=fila["nombre_entidad"], color="#64748B", size=14, shape="triangle")
