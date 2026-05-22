@@ -1002,230 +1002,148 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
     )
 
     # =========================================================================
-    # A) REPRESENTANTE LEGAL
+    # A) Consulta relacional base: Extraer NITs de control del proveedor seleccionado
     # =========================================================================
-    with st.spinner("Consultando Representante Legal..."):
-        df_rep = soql_focal({
-            "$select": "representante_legal, nit_representante_legal",
-            "$where":  (
-                f"upper(trim(proveedor_adjudicado)) = '{safe_prov}'"
-                " AND representante_legal IS NOT NULL"
-            ),
+    with st.spinner("Rastreando cadena de custodia y NITs corporativos..."):
+        df_ids = soql_focal({
+            "$select": "nit_proveedor, representante_legal, nit_representante_legal",
+            "$where": f"upper(trim(proveedor_adjudicado)) = '{safe_prov}' AND nit_representante_legal IS NOT NULL",
             "$limit": "1"
         })
 
-    rep_legal = "NO REGISTRADO"
-    nit_rep   = "N/A"
-    if not df_rep.empty:
-        rep_legal = str(df_rep.iloc[0].get("representante_legal", "NO REGISTRADO")).strip().upper()
-        nit_rep   = str(df_rep.iloc[0].get("nit_representante_legal", "N/A")).strip()
+    if df_ids.empty:
+        st.warning(f"El proveedor {proveedor_sel} no registra NIT de Representante Legal para cruces de carrusel.")
+    else:
+        nit_prov_central = str(df_ids.iloc[0].get("nit_proveedor", "N/A"))
+        rep_legal_nom    = str(df_ids.iloc[0].get("representante_legal", "NO REGISTRADO")).upper()
+        nit_rep_central  = str(df_ids.iloc[0].get("nit_representante_legal", "N/A"))
 
-    # =========================================================================
-    # B) MALLA CORPORATIVA (empresas que comparten el mismo NIT de representante)
-    # =========================================================================
-    df_mallas           = pd.DataFrame()
-    empresas_vinculadas = [proveedor_sel]
-
-    if nit_rep not in ("N/A", "", "nan", "None"):
-        safe_nit = nit_rep.replace("'", "''")
+        # =========================================================================
+        # B) CRUCE FORENSE: Buscar todas las empresas que comparten este Representante y sus Entidades
+        # =========================================================================
         with st.spinner("Rastreando malla empresarial por NIT..."):
-            df_mallas = soql_focal({
-                "$select": (
-                    "upper(trim(proveedor_adjudicado)) AS empresa,"
-                    "upper(trim(nombre_entidad)) AS entidad,"
-                    "SUM(valor_del_contrato) AS valor_total,"
-                    "COUNT(*) AS contratos"
-                ),
-                "$where": (
-                    f"nit_representante_legal = '{safe_nit}'"
-                    f" AND date_extract_y(fecha_de_firma) = {anio}"
-                ),
-                "$group": (
-                    "upper(trim(proveedor_adjudicado)),"
-                    "upper(trim(nombre_entidad))"
-                ),
-                "$limit": "200"
+            safe_nit = nit_rep_central.replace("'", "''")
+            df_malla_total = soql_focal({
+                "$select": "upper(trim(proveedor_adjudicado)) AS proveedor_adjudicado, nit_proveedor, upper(trim(nombre_entidad)) AS nombre_entidad, nit_entidad, SUM(valor_del_contrato) as sum_valor, COUNT(*) as cant_contratos",
+                "$where": f"nit_representante_legal = '{safe_nit}' AND date_extract_y(fecha_de_firma) = {anio}",
+                "$group": "upper(trim(proveedor_adjudicado)), nit_proveedor, upper(trim(nombre_entidad)), nit_entidad",
+                "$limit": "300"
             })
-        if not df_mallas.empty:
-            empresas_vinculadas = df_mallas['empresa'].unique().tolist()
 
-    num_empresas = len(empresas_vinculadas)
+        # Procesamiento de variables economicas para el grafo
+        if not df_malla_total.empty:
+            df_malla_total["sum_valor"] = pd.to_numeric(df_malla_total["sum_valor"], errors="coerce").fillna(0)
+            df_malla_total["cant_contratos"] = pd.to_numeric(df_malla_total["cant_contratos"], errors="coerce").fillna(0)
+        else:
+            df_malla_total = pd.DataFrame(columns=["proveedor_adjudicado", "nit_proveedor", "nombre_entidad", "nit_entidad", "sum_valor", "cant_contratos"])
 
-    # =========================================================================
-    # C) TARJETAS KPI: Rep. Legal + Malla + Entidades
-    # =========================================================================
-    col_rep1, col_rep2, col_rep3 = st.columns([2.5, 1, 1])
+        # =========================================================================
+        # C) RENDERIZADO DE MÉTRICAS DINÁMICAS (KPIs) DEL EXPEDIENTE
+        # =========================================================================
+        total_empresas_malla = df_malla_total["nit_proveedor"].nunique() if not df_malla_total.empty else 1
+        total_entidades_afectadas = df_malla_total["nit_entidad"].nunique() if not df_malla_total.empty else 1
+        monto_global_red = df_malla_total["sum_valor"].sum() if not df_malla_total.empty else 0
 
-    with col_rep1:
-        st.markdown(
-            f"<div style='background:{C['card']};border:1px solid {C['border']};"
-            "border-radius:10px;padding:14px;'>"
-            f"<div style='font-size:.62rem;color:{C['muted']};font-weight:700;"
-            "letter-spacing:1px;text-transform:uppercase;'>Representante Legal Oficial</div>"
-            f"<div style='font-size:1rem;font-weight:700;color:#fff;margin-top:4px;'>{rep_legal}</div>"
-            f"<div style='font-size:.72rem;color:{C['muted']};margin-top:3px;'>"
-            f"NIT / Cedula: <b style='color:{C['text']};'>{nit_rep}</b></div>"
-            "</div>",
-            unsafe_allow_html=True
-        )
+        col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
+        with col_kpi1:
+            color_alert = "#F43F5E" if total_empresas_malla > 1 else "#22C55E"
+            st.markdown(f"""
+            <div style='background:rgba(13,20,33,0.6); border:1px solid #1A2336; border-radius:8px; padding:12px; text-align:center;'>
+                <div style='font-size:0.65rem; color:#64748B; font-weight:700; text-transform:uppercase;'>Empresas Espejo Detectadas</div>
+                <div style='font-size:1.6rem; font-weight:900; color:{color_alert};'>{total_empresas_malla}</div>
+                <div style='font-size:0.68rem; color:#64748B; margin-top:2px;'>Asociadas al mismo Representante</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col_kpi2:
+            st.markdown(f"""
+            <div style='background:rgba(13,20,33,0.6); border:1px solid #1A2336; border-radius:8px; padding:12px; text-align:center;'>
+                <div style='font-size:0.65rem; color:#64748B; font-weight:700; text-transform:uppercase;'>Entidades Contratadas</div>
+                <div style='font-size:1.6rem; font-weight:900; color:#4F8EF7;'>{total_entidades_afectadas}</div>
+                <div style='font-size:0.68rem; color:#64748B; margin-top:2px;'>Ecosistema institucional afectado</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col_kpi3:
+            st.markdown(f"""
+            <div style='background:rgba(13,20,33,0.6); border:1px solid #1A2336; border-radius:8px; padding:12px; text-align:center;'>
+                <div style='font-size:0.65rem; color:#64748B; font-weight:700; text-transform:uppercase;'>Monto Acumulado de la Red</div>
+                <div style='font-size:1.2rem; font-weight:900; color:#F59E0B; margin-top:6px;'>{format_b(monto_global_red)}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-    with col_rep2:
-        color_e = C['green'] if num_empresas == 1 else C['red']
-        bg_e    = "rgba(34,197,94,.07)" if num_empresas == 1 else "rgba(244,63,94,.07)"
-        bord_e  = "rgba(34,197,94,.25)" if num_empresas == 1 else "rgba(244,63,94,.25)"
-        label_e = "Unica" if num_empresas == 1 else "ALERTA: Malla"
-        st.markdown(
-            f"<div style='background:{bg_e};border:1px solid {bord_e};"
-            "border-radius:10px;padding:14px;text-align:center;'>"
-            f"<div style='font-size:.62rem;color:{color_e};font-weight:700;"
-            "letter-spacing:1px;text-transform:uppercase;'>Empresas con este REP</div>"
-            f"<div style='font-size:1.8rem;font-weight:900;color:{color_e};"
-            f"line-height:1.1;margin-top:4px;'>{num_empresas}</div>"
-            f"<div style='font-size:.65rem;color:{color_e};margin-top:4px;"
-            f"font-weight:700;'>{label_e}</div>"
-            "</div>",
-            unsafe_allow_html=True
-        )
+        # =========================================================================
+        # D) CONSTRUCCIÓN DEL GRAFO TRIPARTITO DINÁMICO
+        # =========================================================================
+        if total_empresas_malla > 0 and not df_malla_total.empty:
+            st.markdown("<br><div style='font-size:0.75rem; font-weight:700; color:#fff; text-transform:uppercase; letter-spacing:0.5px;'>🕸️ Mapa de Relaciones Dinámico e Impacto Económico de la Red</div>", unsafe_allow_html=True)
 
-    with col_rep3:
-        ent_vals = prov_df[prov_df['proveedor'] == proveedor_sel]['entidades_distintas'].values
-        n_ent    = int(ent_vals[0]) if len(ent_vals) else 1
-        color_ent = C['amber'] if n_ent > 2 else C['green']
-        bg_ent    = "rgba(245,158,11,.07)" if n_ent > 2 else "rgba(34,197,94,.07)"
-        bord_ent  = "rgba(245,158,11,.25)" if n_ent > 2 else "rgba(34,197,94,.25)"
-        label_ent = "Multi-entidad" if n_ent > 2 else "Localizado"
-        st.markdown(
-            f"<div style='background:{bg_ent};border:1px solid {bord_ent};"
-            "border-radius:10px;padding:14px;text-align:center;'>"
-            f"<div style='font-size:.62rem;color:{color_ent};font-weight:700;"
-            "letter-spacing:1px;text-transform:uppercase;'>Entidades Publicas</div>"
-            f"<div style='font-size:1.8rem;font-weight:900;color:{color_ent};"
-            f"line-height:1.1;margin-top:4px;'>{n_ent}</div>"
-            f"<div style='font-size:.65rem;color:{color_ent};margin-top:4px;"
-            f"font-weight:700;'>{label_ent}</div>"
-            "</div>",
-            unsafe_allow_html=True
-        )
+            net = Network(height="360px", width="100%", bgcolor="#060B14", font_color="#F1F5F9")
+            # Configuración física óptima para evitar rebotes continuos o congelamiento
+            net.barnes_hut(gravity=-1500, central_gravity=0.4, spring_length=95)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # =========================================================================
-    # D) GRAFO FOCALIZADO DE MALLA CORPORATIVA (solo si hay carrusel detectado)
-    # =========================================================================
-    if num_empresas > 1 and not df_mallas.empty:
-        df_mallas['valor_total'] = pd.to_numeric(
-            df_mallas['valor_total'], errors='coerce').fillna(0)
-        df_mallas['contratos']   = pd.to_numeric(
-            df_mallas['contratos'], errors='coerce').fillna(0).astype(int)
-
-        st.markdown(
-            "<div style='background:rgba(244,63,94,.06);border:1px solid rgba(244,63,94,.25);"
-            "border-radius:10px;padding:10px 14px;margin-bottom:10px;'>"
-            f"<span style='font-size:.72rem;font-weight:700;color:{C['red']};"
-            "text-transform:uppercase;letter-spacing:1px;'>"
-            "Grafo Relacional de Malla Corporativa &mdash; Posible Carrusel"
-            "</span>"
-            f"<div style='font-size:.68rem;color:{C['muted']};margin-top:2px;'>"
-            "Rojo = Representante Legal &nbsp;&bull;&nbsp; "
-            "Azul = Empresas vinculadas &nbsp;&bull;&nbsp; "
-            "Gris = Entidades Publicas</div>"
-            "</div>",
-            unsafe_allow_html=True
-        )
-
-        net_focal = Network(
-            height="320px", width="100%",
-            bgcolor=C['bg'], font_color=C['text'],
-            directed=False
-        )
-        net_focal.barnes_hut(
-            gravity=-1800, central_gravity=0.4,
-            spring_length=80, spring_strength=0.05
-        )
-
-        # Nodo central: Representante Legal
-        rep_label_short = rep_legal[:22] + ("..." if len(rep_legal) > 22 else "")
-        net_focal.add_node(
-            nit_rep,
-            label=rep_label_short,
-            title="REP LEGAL: " + rep_legal + "<br>NIT: " + nit_rep,
-            color={"background": C['red'], "border": "#fff",
-                   "highlight": {"background": "#FF6B6B", "border": "#fff"}},
-            size=28, shape="diamond",
-            font={"size": 11, "color": "#fff", "bold": True}
-        )
-
-        empresas_vistas  = set()
-        entidades_vistas = set()
-
-        for _, row_m in df_mallas.iterrows():
-            emp = str(row_m['empresa'])
-            ent = str(row_m['entidad'])
-            val = float(row_m['valor_total'])
-            cnt = int(row_m['contratos'])
-
-            # Nodo Empresa (2 nivel - azul / rojo si es el seleccionado)
-            if emp not in empresas_vistas:
-                emp_label_s = emp[:20] + ("..." if len(emp) > 20 else "")
-                is_sel      = (emp == proveedor_sel)
-                net_focal.add_node(
-                    emp,
-                    label=emp_label_s,
-                    title="EMPRESA: " + emp + "<br>Contratos: " + str(cnt) + "<br>Valor: " + format_b(val),
-                    color={
-                        "background": C['red'] if is_sel else C['blue'],
-                        "border": "#fff" if is_sel else C['blue'],
-                        "highlight": {"background": C['red'] if is_sel else "#7EB3FF", "border": "#fff"}
-                    },
-                    size=18 if is_sel else 14,
-                    shape="dot",
-                    font={"size": 10, "color": "#fff"}
-                )
-                net_focal.add_edge(
-                    nit_rep, emp,
-                    color={"color": C['red'], "opacity": 0.8},
-                    width=2,
-                    title="REP firma por " + emp
-                )
-                empresas_vistas.add(emp)
-
-            # Nodo Entidad (3er nivel - gris oscuro)
-            ent_id = "E__" + ent
-            if ent_id not in entidades_vistas:
-                ent_label_s = ent[:20] + ("..." if len(ent) > 20 else "")
-                net_focal.add_node(
-                    ent_id,
-                    label=ent_label_s,
-                    title="ENTIDAD PUB: " + ent + "<br>Contratos: " + str(cnt) + "<br>Valor: " + format_b(val),
-                    color={
-                        "background": "#1E3A5F",
-                        "border": C['border'],
-                        "highlight": {"background": "#2A5080", "border": C['blue']}
-                    },
-                    size=12, shape="square",
-                    font={"size": 9, "color": C['muted']}
-                )
-                entidades_vistas.add(ent_id)
-
-            net_focal.add_edge(
-                emp, ent_id,
-                color={"color": C['border'], "opacity": 0.6},
-                width=max(1, min(cnt // 2, 5)),
-                title=str(cnt) + " contratos | " + format_b(val)
+            # Nodo Central: Representante Legal
+            net.add_node(
+                nit_rep_central,
+                label=f"REP: {rep_legal_nom[:18]}...",
+                title=f"Representante Legal:<br>{rep_legal_nom}<br>ID: {nit_rep_central}",
+                color="#F43F5E", size=24, shape="diamond"
             )
 
-        # Renderizar grafo focalizado
-        try:
-            html_focal = net_focal.generate_html()
-            st.markdown(
-                f"<div style='border:1px solid {C['border']};border-radius:10px;"
-                "overflow:hidden;margin-bottom:16px;'>",
-                unsafe_allow_html=True
-            )
-            components.html(html_focal, height=330, scrolling=False)
-            st.markdown("</div>", unsafe_allow_html=True)
-        except Exception as e_graf:
-            st.warning(f"No se pudo renderizar el grafo focalizado: {e_graf}")
+            # Inyección de relaciones desde el dataframe de la malla
+            empresas_vistas = set()
+            entidades_vistas = set()
+            
+            import math
+
+            for _, fila in df_malla_total.iterrows():
+                e_nom = str(fila["proveedor_adjudicado"])
+                e_nit = str(fila["nit_proveedor"])
+                ent_nom = str(fila["nombre_entidad"])
+                ent_nit = str(fila["nit_entidad"])
+                val_total = float(fila["sum_valor"])
+                contratos_n = int(fila["cant_contratos"])
+
+                # Calcular grosor de aristas proporcional al flujo de dinero (Logarítmico para evitar líneas gigantes)
+                grosor_arista = max(1, math.log(val_total + 1) / 3) if val_total > 0 else 1
+
+                # Agregar Nodos de Empresas (Nivel 2)
+                if e_nit not in empresas_vistas:
+                    color_empresa = "#4F8EF7" if e_nit == nit_prov_central else "#A78BFA" # Resalta la empresa seleccionada vs satélites
+                    net.add_node(
+                        e_nit,
+                        label=e_nom[:16]+"...",
+                        title=f"Razón Social: {e_nom}<br>NIT: {e_nit}",
+                        color=color_empresa, size=18, shape="dot"
+                    )
+                    # Conectar Representante -> Empresa
+                    net.add_edge(nit_rep_central, e_nit, color="#F43F5E", width=2, dash=True)
+                    empresas_vistas.add(e_nit)
+
+                # Agregar Nodos de Entidades Públicas (Nivel 3)
+                if ent_nit not in entidades_vistas:
+                    net.add_node(
+                        ent_nit,
+                        label=ent_nom[:16]+"...",
+                        title=f"Entidad: {ent_nom}<br>NIT: {ent_nit}",
+                        color="#64748B", size=14, shape="triangle"
+                    )
+                    entidades_vistas.add(ent_nit)
+                
+                # Conectar Empresa -> Entidad con grosor basado en el valor adjudicado
+                net.add_edge(
+                    e_nit, ent_nit,
+                    color="#1A2336",
+                    width=grosor_arista,
+                    title=f"Monto Adjudicado: {format_b(val_total)}<br>Contratos: {int(contratos_n)}"
+                )
+
+            # Guardar y renderizar el componente HTML en Streamlit
+            path_html = os.path.join(TEMP_DIR, "temp_interactive_network.html")
+            try:
+                net.save_graph(path_html)
+                with open(path_html, 'r', encoding='utf-8') as f:
+                    components.html(f.read(), height=370, scrolling=False)
+            except Exception as e_graf:
+                st.warning(f"No se pudo renderizar el grafo focalizado: {e_graf}")
 
     # =========================================================================
     # E) AUDITORIA FINANCIERA: Historial detallado de contratos
