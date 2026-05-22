@@ -87,43 +87,51 @@ def get_network_raw_data(anio: int, dep_raw: str = "", mun_raw: str = "") -> pd.
         safe_mun = mun_raw.replace("'", "''")
         conds.append(f"upper(ciudad) = '{safe_mun}'")
 
-    # ⬇️ SoQL con GROUP BY en el servidor → llegan ~150 filas en vez de 1000
-    params = {
-        "$select": (
-            "upper(trim(proveedor_adjudicado)) AS proveedor_adjudicado, "
-            "upper(trim(nombre_entidad)) AS nombre_entidad, "
-            "upper(trim(modalidad_de_contratacion)) AS modalidad_de_contratacion, "
-            "upper(trim(tipo_de_contrato)) AS tipo_de_contrato, "
-            "SUM(valor_del_contrato) AS valor_total, "
-            "COUNT(*) AS contratos"
-        ),
+
+    # 1. Top por Valor (captura los mega-contratos)
+    params_valor = {
+        "$select": "upper(trim(proveedor_adjudicado)) AS proveedor_adjudicado, upper(trim(nombre_entidad)) AS nombre_entidad, upper(trim(modalidad_de_contratacion)) AS modalidad_de_contratacion, upper(trim(tipo_de_contrato)) AS tipo_de_contrato, COUNT(*) AS contratos, SUM(valor_del_contrato) AS valor_total",
         "$where":  " AND ".join(conds),
         "$group":  "upper(trim(proveedor_adjudicado)), upper(trim(nombre_entidad)), upper(trim(modalidad_de_contratacion)), upper(trim(tipo_de_contrato))",
         "$order":  "SUM(valor_del_contrato) DESC",
-        "$limit":  "2000"   # 2000 aristas agregadas, no filas crudas
+        "$limit":  "3000"
+    }
+
+    # 2. Top por Volumen/Frecuencia (captura carruseles y personas naturales con muchos contratos pequeños)
+    params_frecuencia = {
+        "$select": "upper(trim(proveedor_adjudicado)) AS proveedor_adjudicado, upper(trim(nombre_entidad)) AS nombre_entidad, upper(trim(modalidad_de_contratacion)) AS modalidad_de_contratacion, upper(trim(tipo_de_contrato)) AS tipo_de_contrato, COUNT(*) AS contratos, SUM(valor_del_contrato) AS valor_total",
+        "$where":  " AND ".join(conds),
+        "$group":  "upper(trim(proveedor_adjudicado)), upper(trim(nombre_entidad)), upper(trim(modalidad_de_contratacion)), upper(trim(tipo_de_contrato))",
+        "$order":  "COUNT(*) DESC",
+        "$limit":  "3000"
     }
 
     try:
-        r = requests.get(API_BASE, params=params, timeout=API_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
+        # Petición 1: Por Valor
+        r_val = requests.get(API_BASE, params=params_valor, timeout=API_TIMEOUT)
+        r_val.raise_for_status()
+        data_val = r_val.json()
 
-        if not data:
+        # Petición 2: Por Frecuencia
+        r_frec = requests.get(API_BASE, params=params_frecuencia, timeout=API_TIMEOUT)
+        r_frec.raise_for_status()
+        data_frec = r_frec.json()
+
+        if not data_val and not data_frec:
             return pd.DataFrame()
 
-        df = pd.DataFrame(data)
+        df_val = pd.DataFrame(data_val)
+        df_frec = pd.DataFrame(data_frec)
+
+        # Unir y eliminar duplicados (por si una arista es top valor y top frecuencia a la vez)
+        df = pd.concat([df_val, df_frec], ignore_index=True)
+        if not df.empty:
+            df = df.drop_duplicates(subset=['proveedor_adjudicado', 'nombre_entidad', 'modalidad_de_contratacion', 'tipo_de_contrato'])
+
         df['valor_total'] = pd.to_numeric(df['valor_total'], errors='coerce').fillna(0)
         df['contratos']   = pd.to_numeric(df['contratos'],   errors='coerce').fillna(0).astype(int)
 
-        # Renombrar columnas para compatibilidad con el pipeline
-        df = df.rename(columns={
-            'proveedor_adjudicado':       'proveedor_adjudicado',
-            'nombre_entidad':             'nombre_entidad',
-            'modalidad_de_contratacion':  'modalidad_de_contratacion',
-            'tipo_de_contrato':           'tipo_de_contrato',
-        })
-
-        print(f"[get_network_raw_data] {len(df)} aristas pre-agregadas desde API")
+        print(f"[get_network_raw_data] {len(df)} aristas combinadas (Valor + Frecuencia)")
         return df
 
     except requests.Timeout:
