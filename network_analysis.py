@@ -1053,7 +1053,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     
                     # Consulta C: Historial financiero detallado
                     df_contratos_api = soql_focal({
-                        "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio_del_contrato AS fecha_de_inicio, fecha_de_fin_del_contrato AS fecha_fin, estado_contrato AS estado_del_contrato, tipo_de_contrato, modalidad_de_contratacion, valor_de_pago_adelantado AS valor_pago_adelantado, valor_amortizado, valor_pendiente_de_pago AS valor_pendiente",
+                        "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio_del_contrato AS fecha_de_inicio, fecha_de_fin_del_contrato AS fecha_fin, estado_contrato AS estado_del_contrato, tipo_de_contrato, modalidad_de_contratacion, valor_de_pago_adelantado AS valor_pago_adelantado, valor_amortizado, valor_pagado, nombre_supervisor",
                         "$where": f"date_extract_y(fecha_de_firma) = {anio} AND {where_contratos}",
                         "$order": "valor_del_contrato DESC",
                         "$limit": "100"
@@ -1088,7 +1088,8 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                             df_contratos_local["fecha_fin"] = ""
                             df_contratos_local["valor_pago_adelantado"] = 0
                             df_contratos_local["valor_amortizado"] = 0
-                            df_contratos_local["valor_pendiente"] = 0
+                            df_contratos_local["valor_pagado"] = 0
+                            df_contratos_local["nombre_supervisor"] = "No reportado" 
                             
                             st.session_state["forensic_contratos_data"] = df_contratos_local
                         else:
@@ -1173,15 +1174,16 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                 if "fecha_de_firma" not in df_contratos.columns: df_contratos["fecha_de_firma"] = "No Especificada"
                 if "valor_pago_adelantado" not in df_contratos.columns: df_contratos["valor_pago_adelantado"] = 0
                 if "valor_amortizado" not in df_contratos.columns: df_contratos["valor_amortizado"] = 0
-                if "valor_pendiente" not in df_contratos.columns: df_contratos["valor_pendiente"] = 0
+                if "valor_pagado" not in df_contratos.columns: df_contratos["valor_pagado"] = 0
                 if "fecha_de_inicio" not in df_contratos.columns: df_contratos["fecha_de_inicio"] = ""
                 if "fecha_fin" not in df_contratos.columns: df_contratos["fecha_fin"] = ""
                 if "tipo_de_contrato" not in df_contratos.columns: df_contratos["tipo_de_contrato"] = "No Especificado"
+                if "nombre_supervisor" not in df_contratos.columns: df_contratos["nombre_supervisor"] = "Sin Supervisor"
 
                 df_contratos["valor_del_contrato"] = pd.to_numeric(df_contratos["valor_del_contrato"], errors="coerce").fillna(0)
                 df_contratos["valor_pago_adelantado"] = pd.to_numeric(df_contratos["valor_pago_adelantado"], errors="coerce").fillna(0)
                 df_contratos["valor_amortizado"] = pd.to_numeric(df_contratos["valor_amortizado"], errors="coerce").fillna(0)
-                df_contratos["valor_pendiente"] = pd.to_numeric(df_contratos["valor_pendiente"], errors="coerce").fillna(0)
+                df_contratos["valor_pagado"] = pd.to_numeric(df_contratos["valor_pagado"], errors="coerce").fillna(0)
 
                 for col_f in ["fecha_de_firma", "fecha_de_inicio", "fecha_fin"]:
                     if col_f in df_contratos.columns:
@@ -1198,7 +1200,8 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     "Fin": df_contratos["fecha_fin"],
                     "Anticipo": df_contratos["valor_pago_adelantado"].apply(format_b),
                     "Amortizado": df_contratos["valor_amortizado"].apply(format_b),
-                    "Saldo Pendiente": df_contratos["valor_pendiente"].apply(format_b)
+                    "Pagado": df_contratos["valor_pagado"].apply(format_b),
+                    "Supervisor": df_contratos["nombre_supervisor"].fillna("Sin Supervisor").str.title()
                 })
                 st.dataframe(df_detallado_disp, use_container_width=True, hide_index=True, key="tabla_auditoria_financiera")
             else:
