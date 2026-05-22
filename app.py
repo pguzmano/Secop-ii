@@ -67,6 +67,20 @@ html,body,[class*="css"]{{font-family:'Inter',sans-serif;background:{C['bg']};co
 [data-testid="stSidebar"]{{background:{C['card']};border-right:1px solid {C['border']};}}
 header[data-testid="stHeader"]{{background:transparent;height:0;}}
 #MainMenu,footer{{display:none;}}
+
+/* Responsividad Móvil */
+@media (max-width: 768px) {{
+    .hero {{ padding: 16px 20px !important; margin-bottom: 16px !important; }}
+    .kpi {{ padding: 15px !important; }}
+    .kpi-val {{ font-size: 1.4rem !important; }}
+    .kpi-lbl {{ font-size: 0.55rem !important; }}
+    .kpi-sub {{ font-size: 0.65rem !important; }}
+    .sec-ttl {{ font-size: 0.9rem !important; }}
+    .panel {{ padding: 15px !important; margin-bottom: 8px !important; }}
+    .breadcrumb {{ padding: 8px 12px !important; font-size: 0.75rem !important; }}
+    /* Ajuste de iframes de grafos para evitar atrapamiento de scroll */
+    iframe {{ max-height: 60vh !important; }}
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -92,6 +106,7 @@ def normalizar(texto: str) -> str:
 def fmt_b(v):
     try:
         v = float(v)
+        if pd.isna(v) or v == float('inf') or v == float('-inf'): return "—"
         if v >= 1e12: return f"${v/1e12:.2f} B"
         if v >= 1e9:  return f"${v/1e9:.1f} MM"
         if v >= 1e6:  return f"${v/1e6:.0f} M"
@@ -129,49 +144,36 @@ def monitor_latency(func_name: str):
 
 def soql_get(params: dict) -> pd.DataFrame:
     """Ejecuta query SoQL. Sin SQLite. Sin reintentos agresivos."""
-    try:
-        r = requests.get(API_BASE, params=params, timeout=20,
-                         headers={"Accept-Encoding": "gzip", "User-Agent": "SECOP-Dashboard/2.0"})
-        r.raise_for_status()
-        data = r.json()
-        return pd.DataFrame(data) if data else pd.DataFrame()
-    except requests.Timeout:
-        st.warning("⏱️ La consulta tardó demasiado. Intenta filtrar por municipio específico.")
-        return pd.DataFrame()
-    except Exception as e:
-        st.warning(f"⚠️ Error en consulta: {e}")
-        return pd.DataFrame()
+    import time
+    for attempt in range(3):
+        try:
+            r = requests.get(API_BASE, params=params, timeout=60,
+                             headers={"Accept-Encoding": "gzip", "User-Agent": "SECOP-Dashboard/2.0"})
+            if r.status_code == 500 and attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            data = r.json()
+            return pd.DataFrame(data) if data else pd.DataFrame()
+        except requests.Timeout:
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            st.warning("⏱️ La consulta tardó demasiado tras varios intentos.")
+            return pd.DataFrame()
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            st.warning(f"⚠️ Error en consulta: {e}")
+            return pd.DataFrame()
 
 
 @st.cache_data(ttl=60, show_spinner=False)  # TTL reducido, sin spinner
 @monitor_latency("get_anios")
 def get_anios() -> list[int]:
-    try:
-        df = soql_get({
-            "$select": "date_extract_y(fecha_de_firma) AS anio, COUNT(*) AS n",
-            "$group":  "date_extract_y(fecha_de_firma)",
-            "$where":  "fecha_de_firma IS NOT NULL",
-            "$order":  "anio DESC",
-            "$limit":  "50",
-        })
-        if df.empty or "anio" not in df.columns:
-            print("[get_anios] DataFrame vacío o sin columna 'anio', usando años por defecto")
-            return [2026, 2025, 2024, 2023, 2022, 2021, 2020]
-        anios = sorted([int(float(x)) for x in df["anio"].dropna().tolist()], reverse=True)
-        # Filtrar años con datos reales (>=5 contratos)
-        if "n" in df.columns:
-            df["n"]    = pd.to_numeric(df["n"], errors="coerce").fillna(0)
-            df["anio"] = pd.to_numeric(df["anio"], errors="coerce")
-            anios = sorted(
-                [int(a) for a in df.loc[df["n"] >= 5, "anio"].tolist()],
-                reverse=True
-            )
-        print(f"[get_anios] Años obtenidos: {anios}")
-        return anios if anios else [2026, 2025, 2024, 2023]
-    except Exception as e:
-        print(f"[get_anios] Error: {e}")
-        st.error(f"⚠️ Error obteniendo años: {e}")
-        return [2026, 2025, 2024, 2023, 2022, 2021, 2020]
+    # Hardcoded para mejorar el rendimiento de carga inicial
+    return [2026, 2025, 2024, 2023]
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -237,6 +239,61 @@ def get_entidades(anio: int, mun_raw: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60, show_spinner=False)
+def get_proveedores_municipio(anio: int, mun_raw: str) -> pd.DataFrame:
+    """Top 20 proveedores adjudicados en un municipio."""
+    mun_q = mun_raw.replace("'", "''")
+    df = soql_get({
+        "$select": "proveedor_adjudicado, COUNT(*) AS contratos, SUM(valor_del_contrato) AS valor",
+        "$where":  (f"date_extract_y(fecha_de_firma) = {anio} "
+                    f"AND upper(ciudad) = '{mun_q}' "
+                    f"AND proveedor_adjudicado IS NOT NULL"),
+        "$group":  "proveedor_adjudicado",
+        "$order":  "valor DESC",
+        "$limit":  "20",
+    })
+    if not df.empty:
+        df["valor"]     = pd.to_numeric(df["valor"],     errors="coerce").fillna(0)
+        df["contratos"] = pd.to_numeric(df["contratos"], errors="coerce").fillna(0)
+    else:
+        df = pd.DataFrame(columns=["proveedor_adjudicado", "valor", "contratos"])
+    return df
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_kpis_modalidad(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -> pd.DataFrame:
+    """Calcula el presupuesto y contratos agrupados por modalidad de contratación."""
+    conds = [f"date_extract_y(fecha_de_firma) = {anio}"]
+    if dep_raw:
+        safe = dep_raw.replace("'", "''")
+        conds.append(f"upper(departamento) = '{safe}'")
+    if mun_raw:
+        safe = mun_raw.replace("'", "''")
+        conds.append(f"upper(ciudad) = '{safe}'")
+    if actor_filter:
+        safe_actor = actor_filter.replace("'", "''")
+        conds.append(f"(nombre_entidad = '{safe_actor}' OR proveedor_adjudicado = '{safe_actor}')")
+        
+    df = soql_get({
+        "$select": "modalidad_de_contratacion, COUNT(*) AS contratos, SUM(valor_del_contrato) AS valor, COUNT(DISTINCT nit_entidad) AS entidades",
+        "$where":  " AND ".join(conds),
+        "$group":  "modalidad_de_contratacion",
+        "$order":  "valor DESC",
+        "$limit":  "20",
+    })
+    if not df.empty:
+        df["valor"]     = pd.to_numeric(df["valor"],     errors="coerce").fillna(0).replace([float('inf'), float('-inf')], 0)
+        df["contratos"] = pd.to_numeric(df["contratos"], errors="coerce").fillna(0)
+        df["entidades"] = pd.to_numeric(df["entidades"], errors="coerce").fillna(0)
+        total_valor = df["valor"].sum()
+        df["participacion_pct"] = (df["valor"] / total_valor * 100).fillna(0)
+        df["ticket_promedio"]   = (df["valor"] / df["contratos"]).fillna(0)
+    else:
+        df = pd.DataFrame(columns=["modalidad_de_contratacion", "valor", "contratos", "entidades", "participacion_pct", "ticket_promedio"])
+    return df
+
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def get_top_entidades_global(anio: int, n: int = 20) -> pd.DataFrame:
     """Top N entidades a nivel nacional. CAPA GLOBAL — sin filtro territorial."""
     df = soql_get({
@@ -277,41 +334,29 @@ def get_top_entidades_dep(anio: int, dep_raw: str, n: int = 15) -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_kpis_nacional(anio: int) -> dict:
-    """KPIs nacionales instantáneos: Reutiliza la consulta departamental agrupada 
-    en lugar de escanear 10M de filas sueltas en Socrata.
-    """
+    """KPIs nacionales calculados mediante el NIT único de cada entidad."""
     df_deps = get_departamentos(anio)
     if df_deps.empty:
-        return {"total_valor": 0, "total_contratos": 0, "total_entidades": "—"}
-    
+        return {"total_valor": 0, "total_contratos": 0, "total_entidades": 0}
+
+    # Usamos get_top_entidades_global que ya funciona y devuelve entidades únicas por nombre
+    # agrupadas — len() da el conteo correcto sin depender de $group en Socrata
+    df_ent = get_top_entidades_global(anio, n=500)
+    total_entidades = int(len(df_ent)) if not df_ent.empty else 0
+            
     return {
         "total_valor": float(df_deps["valor"].sum()),
         "total_contratos": int(df_deps["contratos"].sum()),
-        "total_entidades": "—", # Socrata no permite distinct nacional rápido
+        "total_entidades": total_entidades,
     }
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def get_kpis(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -> dict:
-    """Calcula KPIs. Nivel nacional usa TTL de 24h para evitar queries lentos."""
-    if actor_filter:
-        df_raw = get_network_raw_data(anio, dep_raw, mun_raw)
-        if df_raw.empty:
-            return {"total_valor": 0, "total_contratos": 0, "total_entidades": 0}
-        actor_upper = actor_filter.upper()
-        mask = (df_raw['proveedor_adjudicado'].str.upper() == actor_upper) | \
-               (df_raw['nombre_entidad'].str.upper() == actor_upper)
-        df_filtered = df_raw[mask]
-        if df_filtered.empty:
-            return {"total_valor": 0, "total_contratos": 0, "total_entidades": 0}
-        return {
-            "total_valor": float(df_filtered['valor_total'].sum()),
-            "total_contratos": int(df_filtered['contratos'].sum()),
-            "total_entidades": int(df_filtered['nombre_entidad'].nunique()),
-        }
-    if not dep_raw and not mun_raw:
+def get_kpis_v2(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -> dict:
+    """Calcula KPIs dinámicos precisos basados en el NIT único de la entidad."""
+    if not dep_raw and not mun_raw and not actor_filter:
         return get_kpis_nacional(anio)
-    # Con filtro territorial
+        
     conds = [f"date_extract_y(fecha_de_firma) = {anio}"]
     if dep_raw:
         safe = dep_raw.replace("'", "''")
@@ -319,17 +364,64 @@ def get_kpis(anio: int, dep_raw: str, mun_raw: str, actor_filter: str = "") -> d
     if mun_raw:
         safe = mun_raw.replace("'", "''")
         conds.append(f"upper(ciudad) = '{safe}'")
-        select_clause = "SUM(valor_del_contrato) AS total_valor, COUNT(*) AS total_contratos, COUNT(DISTINCT nombre_entidad) AS total_entidades"
-    else:
-        select_clause = "SUM(valor_del_contrato) AS total_valor, COUNT(*) AS total_contratos"
+    if actor_filter:
+        safe_actor = actor_filter.replace("'", "''")
+        conds.append(f"(nombre_entidad = '{safe_actor}' OR proveedor_adjudicado = '{safe_actor}')")
+        
+    # Totales base del nivel territorial activo
+    select_clause = "SUM(valor_del_contrato) AS total_valor, COUNT(*) AS total_contratos"
     df = soql_get({"$select": select_clause, "$where": " AND ".join(conds), "$limit": "1"})
+    
+    # Conteo preciso usando NIT_ENTIDAD según el nivel
+    total_entidades = 0
+    if mun_raw:
+        # En municipio, le pedimos a Socrata el conteo directo de NITs únicos para esa ciudad
+        safe_mun = mun_raw.replace("'", "''")
+        df_mun_conteo = soql_get({
+            "$select": "COUNT(DISTINCT nit_entidad) AS conteo",
+            "$where": f"date_extract_y(fecha_de_firma) = {anio} AND upper(ciudad) = '{safe_mun}'",
+            "$limit": "1"
+        })
+        try:
+            if not df_mun_conteo.empty and "conteo" in df_mun_conteo.columns:
+                total_entidades = int(float(df_mun_conteo.iloc[0]["conteo"]))
+        except:
+            total_entidades = 0
+            
+    elif dep_raw:
+        # Mismo patrón que municipio: COUNT(DISTINCT) directo sin $group
+        # Un departamento tiene <<datos que el total nacional, Socrata lo resuelve rápido
+        safe_dep = dep_raw.replace("'", "''")
+        df_dep_conteo = soql_get({
+            "$select": "COUNT(DISTINCT nit_entidad) AS conteo",
+            "$where": f"date_extract_y(fecha_de_firma) = {anio} AND upper(departamento) = '{safe_dep}'",
+            "$limit": "1"
+        })
+        try:
+            if not df_dep_conteo.empty and "conteo" in df_dep_conteo.columns:
+                total_entidades = int(float(df_dep_conteo.iloc[0]["conteo"]))
+        except:
+            total_entidades = 0
+
     if df.empty:
-        return {"total_valor": 0, "total_contratos": 0, "total_entidades": 0}
+        return {"total_valor": 0, "total_contratos": 0, "total_entidades": total_entidades}
+    
     row = df.iloc[0]
+    try:
+        val = float(row.get("total_valor", 0) or 0)
+        if pd.isna(val) or val == float('inf') or val == float('-inf'): val = 0.0
+    except: 
+        val = 0.0
+        
+    try:
+        contratos = int(float(row.get("total_contratos", 0) or 0))
+    except:
+        contratos = 0
+    
     return {
-        "total_valor": float(row.get("total_valor", 0) or 0),
-        "total_contratos": int(float(row.get("total_contratos", 0) or 0)),
-        "total_entidades": int(float(row.get("total_entidades", 0) or 0)) if "total_entidades" in row else 0,
+        "total_valor": val,
+        "total_contratos": contratos,
+        "total_entidades": total_entidades
     }
 
 
@@ -393,7 +485,7 @@ def reset():
 def render_kpis(anio, dep, mun, actor_filter=""):
     spinner_ctx = st.spinner("Calculando KPIs...") if not dep and not mun and not actor_filter else contextlib.nullcontext()
     with spinner_ctx:
-        k = get_kpis(anio, dep, mun, actor_filter)
+        k = get_kpis_v2(anio, dep, mun, actor_filter)
     
     items = [
         ("💰", "Presupuesto Total",  fmt_b(k["total_valor"]),      "Valor adjudicado", C["blue"]),
@@ -411,6 +503,33 @@ def render_kpis(anio, dep, mun, actor_filter=""):
                 <div class="kpi-sub">{sub}</div>
                 <div class="kpi-bar" style="background:linear-gradient(90deg,{color}33,{color});"></div>
             </div>""", unsafe_allow_html=True)
+
+            if lbl == "Entidades Únicas":
+                # Obtain entities list based on the current filter level
+                if mun: df_ents = get_entidades(anio, mun)
+                elif dep: df_ents = get_top_entidades_dep(anio, dep, n=150)
+                else: df_ents = get_top_entidades_global(anio, n=150)
+                
+                opciones = ["🌍 Todas las Entidades"]
+                if not df_ents.empty and "nombre_entidad" in df_ents.columns:
+                    opciones += df_ents["nombre_entidad"].dropna().unique().tolist()
+                
+                actor_actual = st.session_state.get("actor_seleccionado", "")
+                idx = opciones.index(actor_actual) if actor_actual in opciones else 0
+                
+                # Add an interactive popover under the KPI
+                with st.popover("🔎 Ver y Filtrar Entidades", use_container_width=True):
+                    def _on_entity_kpi_change():
+                        val = st.session_state["entity_selector_kpi_pop"]
+                        st.session_state["actor_seleccionado"] = "" if val == "🌍 Todas las Entidades" else val
+                        st.session_state["select_actor_raw"] = val
+                    st.selectbox(
+                        "Selecciona una entidad para filtrar KPIs y Grafo:",
+                        options=opciones,
+                        index=idx,
+                        key="entity_selector_kpi_pop",
+                        on_change=_on_entity_kpi_change
+                    )
 
 
 def render_entity_selector(anio: int, mun_raw: str):
@@ -623,7 +742,7 @@ def render_mapa_municipios(anio: int, dep_norm: str, dep_raw: str):
 # ─────────────────────────────────────────────────────────────────────────────
 # TABLA ENTIDADES
 # ─────────────────────────────────────────────────────────────────────────────
-def render_tabla_entidades(anio: int, mun_raw: str, mun_norm: str):
+def render_tablas_municipio(anio: int, mun_raw: str, mun_norm: str):
     """mun_raw = nombre ciudad tal como viene de la API (para WHERE). mun_norm = para display."""
     if not mun_raw:
         return
@@ -682,6 +801,91 @@ def render_tabla_entidades(anio: int, mun_raw: str, mun_norm: str):
             margin=dict(l=0, r=0, t=0, b=0), height=360,
         )
         st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("<hr style='border:none;border-top:1px dashed #1A2336;margin:24px 0;'>", unsafe_allow_html=True)
+    st.markdown(f"<div class='sec-ttl'>💼 Top Proveedores en {mun_norm.title()}</div>", unsafe_allow_html=True)
+
+    df_prov = get_proveedores_municipio(anio, mun_raw)
+    if df_prov.empty:
+        st.info("Sin proveedores para este municipio en el año seleccionado.")
+    else:
+        col_pt, col_pb = st.columns([3, 2])
+        with col_pt:
+            df_prov_disp = df_prov[["proveedor_adjudicado", "contratos", "valor"]].copy()
+            df_prov_disp["presupuesto_fmt"] = df_prov_disp["valor"].apply(fmt_b)
+            df_prov_disp["contratos_fmt"]   = df_prov_disp["contratos"].apply(fmt_n)
+            df_prov_disp = df_prov_disp[["proveedor_adjudicado", "contratos_fmt", "presupuesto_fmt"]]
+            df_prov_disp.columns = ["Proveedor", "Contratos", "Monto Adjudicado"]
+            
+            st.dataframe(
+                df_prov_disp,
+                use_container_width=True, 
+                hide_index=True,
+                key="tabla_proveedores_local"
+            )
+            
+        with col_pb:
+            df_prov_plot = df_prov.head(10).copy()
+            df_prov_plot["nombre_corto"] = df_prov_plot["proveedor_adjudicado"].str[:30] + "…"
+            fig_p = px.bar(
+                df_prov_plot.sort_values("valor"), x="valor", y="nombre_corto", orientation="h",
+                text=df_prov_plot.sort_values("valor")["valor"].apply(fmt_b),
+                color="valor",
+                color_continuous_scale=[[0, C["green"]], [1, "#86EFAC"]],
+            )
+            fig_p.update_traces(textposition="outside", textfont_size=9)
+            fig_p.update_layout(
+                paper_bgcolor=C["bg"], plot_bgcolor=C["bg"], font_color=C["text"],
+                yaxis=dict(showgrid=False, title=""),
+                xaxis=dict(showgrid=True, gridcolor=C["border"], title=""),
+                showlegend=False, coloraxis_showscale=False,
+                margin=dict(l=0, r=0, t=0, b=0), height=360,
+            )
+            st.plotly_chart(fig_p, use_container_width=True)
+
+def render_kpis_modalidad(anio: int, dep_raw: str, mun_raw: str, dep_norm: str, mun_norm: str, actor_filter: str = ""):
+    """Renderiza KPIs por modalidad de contratación."""
+    if actor_filter:
+        nivel_str = f"{actor_filter}"
+    elif mun_norm:
+        nivel_str = f"en {mun_norm.title()}"
+    elif dep_norm:
+        nivel_str = f"en {dep_norm.title()}"
+    else:
+        nivel_str = "Nacional"
+        
+    st.markdown("<hr style='border:none;border-top:1px solid #1A2336;margin:24px 0;'>", unsafe_allow_html=True)
+    st.markdown(f"<div class='sec-ttl'>📊 Análisis por Modalidad de Contratación ({nivel_str})</div>", unsafe_allow_html=True)
+
+    df_mod = get_kpis_modalidad(anio, dep_raw, mun_raw, actor_filter)
+    if df_mod.empty:
+        st.info("No hay datos de modalidades para el área seleccionada.")
+        return
+
+    # Gráfico de Treemap
+    fig_tree = px.treemap(
+        df_mod, path=[px.Constant("Todas"), "modalidad_de_contratacion"], values="valor",
+        color="valor", color_continuous_scale="Blues",
+        custom_data=["contratos", "entidades", "ticket_promedio"]
+    )
+    fig_tree.update_traces(
+        hovertemplate="<b>%{label}</b><br>Presupuesto: %{value:$,.0f}<br>Contratos: %{customdata[0]}<br>Entidades: %{customdata[1]}<br>Ticket Promedio: %{customdata[2]:$,.0f}<extra></extra>"
+    )
+    fig_tree.update_layout(margin=dict(t=10, l=10, r=10, b=10), height=300, paper_bgcolor=C["bg"])
+    st.plotly_chart(fig_tree, use_container_width=True)
+
+    # Tabla de Modalidades
+    df_disp = df_mod[["modalidad_de_contratacion", "valor", "participacion_pct", "contratos", "ticket_promedio", "entidades"]].copy()
+    df_disp["valor_fmt"] = df_disp["valor"].apply(fmt_b)
+    df_disp["pct_fmt"] = df_disp["participacion_pct"].apply(lambda x: f"{x:.1f}%")
+    df_disp["tk_fmt"] = df_disp["ticket_promedio"].apply(fmt_b)
+    df_disp["cnt_fmt"] = df_disp["contratos"].apply(fmt_n)
+    df_disp["ent_fmt"] = df_disp["entidades"].apply(fmt_n)
+    
+    df_disp = df_disp[["modalidad_de_contratacion", "valor_fmt", "pct_fmt", "cnt_fmt", "tk_fmt", "ent_fmt"]]
+    df_disp.columns = ["Modalidad", "Total Adjudicado", "% Participación", "N° Contratos", "Ticket Prom.", "Entidades"]
+    st.dataframe(df_disp, use_container_width=True, hide_index=True)
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -869,11 +1073,14 @@ def main():
                 f"🔎 Filtrando por: <b>{actor}</b></div>",
                 unsafe_allow_html=True
             )
+        with col_clear:
+            if st.button("✕ Quitar", key="clear_actor_top", use_container_width=True):
+                st.session_state["actor_seleccionado"] = ""
+                st.session_state["select_actor_raw"] = "🌍 Mostrar Red Completa"
+                st.rerun()
     render_kpis(anio, dep_raw, mun_raw, actor)
     
-    # Selector de entidad (solo visible con municipio seleccionado)
-    if mun_raw:
-        render_entity_selector(anio, mun_raw)
+    # Selector de entidad interactivo movido al KPI "Entidades Únicas"
     
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -910,13 +1117,20 @@ def main():
     
         st.markdown("<br>", unsafe_allow_html=True)
     
-        # ── Rankings (Debajo del mapa) ────────────────────────────────────────────
+        # ── KPIs por Modalidad (siempre presente, incluso sin entidad seleccionada) ──
+        render_kpis_modalidad(
+            anio, dep_raw=dep_raw, mun_raw=mun_raw,
+            dep_norm=dep_norm, mun_norm=mun_norm,
+            actor_filter=actor
+        )
+
+        # ── Rankings Globales ─────────────────────────────────────────────────────
         render_ranking_global(anio, dep_raw=dep_raw, dep_norm=dep_norm,
                               mun_raw=mun_raw, mun_norm=mun_norm)
     
-        # ── Tabla entidades (solo al seleccionar municipio) ───────────────────────
+        # ── Tabla entidades y proveedores (solo al seleccionar municipio) ─────────
         if mun_raw:
-            render_tabla_entidades(anio, mun_raw=mun_raw, mun_norm=mun_norm)
+            render_tablas_municipio(anio, mun_raw=mun_raw, mun_norm=mun_norm)
 
     with tab_red:
         render_network_tab(anio, dep_raw, mun_raw)
