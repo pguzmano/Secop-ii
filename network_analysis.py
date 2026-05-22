@@ -22,6 +22,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import time
 from functools import wraps
+import math
 
 API_RESOURCE = "jbjy-vk9h"
 API_BASE     = f"https://www.datos.gov.co/resource/{API_RESOURCE}.json"
@@ -1057,11 +1058,13 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     with st.spinner("Construyendo matriz desde registros indexados localmente..."):
                         if edges_df is not None and not edges_df.empty:
                             # Filtrar relaciones de este proveedor desde edges_df
-                            df_malla_local = edges_df[edges_df["proveedor_adjudicado"] == proveedor_actual].copy()
+                            df_malla_local = edges_df[edges_df["proveedor"] == proveedor_actual].copy()
                             
                             # Mapear columnas para simular respuesta de Socrata (Malla)
                             df_malla_local["nit_proveedor"] = "N/A"
-                            df_malla_local["nit_entidad"] = df_malla_local["nombre_entidad"]
+                            df_malla_local["nit_entidad"] = df_malla_local["entidad"]
+                            df_malla_local["proveedor_adjudicado"] = df_malla_local["proveedor"]
+                            df_malla_local["nombre_entidad"] = df_malla_local["entidad"]
                             df_malla_local["sum_valor"] = df_malla_local["valor_total"]
                             df_malla_local["cant_contratos"] = df_malla_local["contratos"]
                             
