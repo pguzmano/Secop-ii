@@ -989,15 +989,26 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
         col_score = "score_forense" if "score_forense" in cols_actuales else ("score" if "score" in cols_actuales else "score_forense")
 
         # Construcción de la Tabla Maestra Visual
-        df_maestra = prov_df[[col_prov, col_cnt, col_val, col_pct, col_score]].copy()
-        df_maestra.columns = ["Contratista / Proveedor", "Contratos", "Monto Total", "% Contr. Directa", "Score Forense"]
-        df_maestra = df_maestra.sort_values(by="Score Forense", ascending=False)
+        df_maestra = prov_df[[col_prov, col_cnt, col_val]].copy()
+        df_maestra.columns = ["Contratista / Proveedor", "Contratos", "Monto Total"]
+        
+        # Formateos
+        df_maestra["Contratos"] = df_maestra["Contratos"].fillna(0).astype(int)
+        # Ordenar por cantidad de contratos como se solicitó
+        df_maestra = df_maestra.sort_values(by="Contratos", ascending=False)
 
         st.markdown("<div style='font-size:0.82rem; color:#64748B; margin-bottom:8px;'>👇 Selecciona un contratista de la tabla para recalcular las métricas y actualizar el mapa de relaciones:</div>", unsafe_allow_html=True)
+        
+        # Buscador
+        busqueda = st.text_input("🔍 Buscar Contratista / Proveedor:", "", key="buscador_forense_maestra")
+        if busqueda:
+            df_maestra = df_maestra[df_maestra["Contratista / Proveedor"].str.contains(busqueda, case=False, na=False)]
 
         # Tabla maestra interactiva con retorno de evento para re-run controlado
         evento_seleccion = st.dataframe(
-            df_maestra.style.background_gradient(subset=["Score Forense"], cmap="Reds"),
+            df_maestra.style.format({
+                "Monto Total": format_b
+            }),
             use_container_width=True,
             hide_index=True,
             on_select="rerun",
@@ -1009,9 +1020,10 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
         if evento_seleccion and evento_seleccion.selection and evento_seleccion.selection.rows:
             idx_tabla = evento_seleccion.selection.rows[0]
             
-            # Recuperamos la fila original completa de prov_df usando el índice de posición absoluta
-            fila_origen = prov_df.iloc[idx_tabla]
-            proveedor_actual = fila_origen[col_prov]
+            # 💡 FIX: Recuperar el nombre usando la tabla filtrada y ordenada que el usuario ve
+            proveedor_actual = df_maestra.iloc[idx_tabla]["Contratista / Proveedor"]
+            # Recuperamos la fila original completa de prov_df haciendo match del nombre
+            fila_origen = prov_df[prov_df[col_prov] == proveedor_actual].iloc[0]
             
             # Evaluamos cambio de selección para no repetir llamadas asíncronas
             if st.session_state["forensic_prov_selected"] != proveedor_actual:
@@ -1089,7 +1101,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     
                     # Consulta C: Historial financiero detallado
                     df_contratos_api = soql_focal({
-                        "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio_del_contrato AS fecha_de_inicio, fecha_de_fin_del_contrato AS fecha_fin, estado_contrato AS estado_del_contrato, tipo_de_contrato, modalidad_de_contratacion, valor_de_pago_adelantado AS valor_pago_adelantado, valor_amortizado, valor_pagado, nombre_supervisor",
+                        "$select": "nombre_entidad, valor_del_contrato, fecha_de_firma, fecha_de_inicio_del_contrato AS fecha_de_inicio, fecha_de_fin_del_contrato AS fecha_fin, estado_contrato AS estado_del_contrato, tipo_de_contrato, modalidad_de_contratacion, valor_de_pago_adelantado AS valor_pago_adelantado, valor_amortizado, valor_pagado, nombre_supervisor, proceso_de_compra, id_contrato",
                         "$where": f"date_extract_y(fecha_de_firma) = {anio} AND {where_contratos}",
                         "$order": "valor_del_contrato DESC",
                         "$limit": "100"
@@ -1264,33 +1276,62 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                 st.info("No se reportaron transacciones financieras sueltas para la auditoría de este contratista.")
 
             # ── INTEGRACIÓN VISUAL EN EL EXPEDIENTE DINÁMICO DEL CONTRATISTA (PROCESOS p6dx-8zbt) ──
-            nit_target = metadata.get("nit_proveedor")
+            cond_prov_procesos = None
             
-            if nit_target and nit_target != "N/A":
-                cond_prov_procesos = f"nit_del_proveedor_adjudicado = '{nit_target}'"
-            else:
-                safe_prov_raw = str(prov_activo).replace("'", "''").upper()
-                cond_prov_procesos = f"upper(nombre_del_proveedor) = '{safe_prov_raw}'"
+            # Intentar cruzar usando proceso_de_compra (llave exacta con id_del_portafolio)
+            if df_contratos is not None and not df_contratos.empty and "proceso_de_compra" in df_contratos.columns:
+                procesos_ids = df_contratos["proceso_de_compra"].dropna().unique().tolist()
+                procesos_ids = [str(p) for p in procesos_ids if str(p).strip()]
+                
+                if procesos_ids:
+                    # Limitar a 150 para que la URL de Socrata no se exceda
+                    ids_str = ",".join([f"'{p}'" for p in procesos_ids[:150]])
+                    cond_prov_procesos = f"id_del_portafolio IN ({ids_str})"
+            
+            # Fallback si no hay IDs
+            if not cond_prov_procesos:
+                nit_target = metadata.get("nit_proveedor")
+                if nit_target and nit_target != "N/A":
+                    cond_prov_procesos = f"nit_del_proveedor_adjudicado = '{nit_target}'"
+                else:
+                    safe_prov_raw = str(prov_activo).replace("'", "''").upper()
+                    cond_prov_procesos = f"upper(nombre_del_proveedor) = '{safe_prov_raw}'"
 
             st.markdown("<br><hr style='border-top: 1px dashed #1A2336; margin:20px 0;'>", unsafe_allow_html=True)
             st.markdown("<h4>📊 Auditoría Forense de Competencia y Ofertas</h4>", unsafe_allow_html=True)
             
             with st.spinner("Consultando nivel de competencia en licitaciones..."):
                 df_ofertas_proceso = soql_get_procesos({
-                    "$select": "entidad, descripci_n_del_procedimiento, referencia_del_proceso, conteo_de_respuestas_a_ofertas, modalidad_de_contratacion, precio_base, urlproceso",
+                    "$select": "id_del_proceso, entidad, descripci_n_del_procedimiento, referencia_del_proceso, proveedores_unicos_con, modalidad_de_contratacion, precio_base, urlproceso",
                     "$where": f"{cond_prov_procesos}",
-                    "$order": "conteo_de_respuestas_a_ofertas ASC",
+                    "$order": "proveedores_unicos_con ASC",
                     "$limit": "100"
                 })
+                
+                # FALLBACK DE SEGURIDAD: Si el cruce por ID falla por asimetrías de SECOP, buscar por NIT/Nombre
+                if df_ofertas_proceso.empty and cond_prov_procesos.startswith("id_del_portafolio"):
+                    nit_target = metadata.get("nit_proveedor")
+                    if nit_target and nit_target != "N/A":
+                        cond_fb = f"nit_del_proveedor_adjudicado = '{nit_target}'"
+                    else:
+                        safe_prov_raw = str(prov_activo).replace("'", "''").upper()
+                        cond_fb = f"upper(nombre_del_proveedor) = '{safe_prov_raw}'"
+                        
+                    df_ofertas_proceso = soql_get_procesos({
+                        "$select": "id_del_proceso, entidad, descripci_n_del_procedimiento, referencia_del_proceso, proveedores_unicos_con, modalidad_de_contratacion, precio_base, urlproceso",
+                        "$where": f"{cond_fb}",
+                        "$order": "proveedores_unicos_con ASC",
+                        "$limit": "100"
+                    })
             
             if df_ofertas_proceso.empty:
                 st.info("No se registran métricas de competencia indexadas para este proveedor en el dataset de Procesos.")
             else:
-                    df_ofertas_proceso["conteo_de_respuestas_a_ofertas"] = pd.to_numeric(df_ofertas_proceso["conteo_de_respuestas_a_ofertas"], errors="coerce").fillna(0)
+                    df_ofertas_proceso["proveedores_unicos_con"] = pd.to_numeric(df_ofertas_proceso["proveedores_unicos_con"], errors="coerce").fillna(0)
                     df_ofertas_proceso["precio_base"] = pd.to_numeric(df_ofertas_proceso["precio_base"], errors="coerce").fillna(0)
                     
                     # Filtramos procesos sin competencia (Ofertas == 1 o Ofertas == 0, típico en Contratación Directa)
-                    procesos_monopolio = df_ofertas_proceso[df_ofertas_proceso["conteo_de_respuestas_a_ofertas"] <= 1]
+                    procesos_monopolio = df_ofertas_proceso[df_ofertas_proceso["proveedores_unicos_con"] <= 1]
                     pct_proponente_unico = (len(procesos_monopolio) / len(df_ofertas_proceso)) * 100
                     
                     presupuesto_sin_competencia = procesos_monopolio["precio_base"].sum()
@@ -1299,7 +1340,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     with col_m1:
                         st.metric(
                             label="Promedio de Ofertas en Adjudicaciones", 
-                            value=f"{df_ofertas_proceso['conteo_de_respuestas_a_ofertas'].mean():.1f} Ofertas"
+                            value=f"{df_ofertas_proceso['proveedores_unicos_con'].mean():.1f} Ofertas"
                         )
                     with col_m2:
                         color_risk = "inverse" if pct_proponente_unico > 50 else "normal"
@@ -1319,13 +1360,22 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                         
                     st.markdown("<div style='font-size:0.75rem; font-weight:700; color:#fff; text-transform:uppercase;'>📋 Análisis de Concurrencia por Proceso Convocado</div>", unsafe_allow_html=True)
                     
+                    def extraer_url(val):
+                        if isinstance(val, dict):
+                            return val.get("url", None)
+                        return val
+                        
+                    enlace_col = df_ofertas_proceso.get("urlproceso", None)
+                    if enlace_col is not None:
+                        enlace_col = enlace_col.apply(extraer_url)
+
                     df_view_ofertas = pd.DataFrame({
                         "Entidad Compradora": df_ofertas_proceso["entidad"].str.title(),
                         "Referencia Proceso": df_ofertas_proceso["referencia_del_proceso"],
                         "Modalidad": df_ofertas_proceso["modalidad_de_contratacion"],
                         "Precio Base": df_ofertas_proceso["precio_base"].apply(format_b),
-                        "Ofertas Presentadas": df_ofertas_proceso["conteo_de_respuestas_a_ofertas"].astype(int),
-                        "Enlace": df_ofertas_proceso.get("urlproceso", None)
+                        "Ofertas Presentadas": df_ofertas_proceso["proveedores_unicos_con"].astype(int),
+                        "Enlace": enlace_col
                     })
                     
                     st.dataframe(
