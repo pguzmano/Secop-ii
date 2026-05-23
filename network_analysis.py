@@ -1277,7 +1277,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
             
             with st.spinner("Consultando nivel de competencia en licitaciones..."):
                 df_ofertas_proceso = soql_get_procesos({
-                    "$select": "entidad, descripci_n_del_procedimiento, referencia_del_proceso, conteo_de_respuestas_a_ofertas, modalidad_de_contratacion, precio_base",
+                    "$select": "entidad, descripci_n_del_procedimiento, referencia_del_proceso, conteo_de_respuestas_a_ofertas, modalidad_de_contratacion, precio_base, urlproceso",
                     "$where": f"{cond_prov_procesos}",
                     "$order": "conteo_de_respuestas_a_ofertas ASC",
                     "$limit": "100"
@@ -1324,7 +1324,8 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                         "Referencia Proceso": df_ofertas_proceso["referencia_del_proceso"],
                         "Modalidad": df_ofertas_proceso["modalidad_de_contratacion"],
                         "Precio Base": df_ofertas_proceso["precio_base"].apply(format_b),
-                        "Ofertas Presentadas": df_ofertas_proceso["conteo_de_respuestas_a_ofertas"].astype(int)
+                        "Ofertas Presentadas": df_ofertas_proceso["conteo_de_respuestas_a_ofertas"].astype(int),
+                        "Enlace": df_ofertas_proceso.get("urlproceso", None)
                     })
                     
                     st.dataframe(
@@ -1333,5 +1334,13 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                             subset=["Ofertas Presentadas"]
                         ),
                         use_container_width=True,
-                        hide_index=True
+                        hide_index=True,
+                        column_config={
+                            "Enlace": st.column_config.LinkColumn(
+                                "Enlace SECOP",
+                                help="Ir al proceso oficial en SECOP II",
+                                max_chars=100,
+                                display_text="🔗 Ver Proceso"
+                            )
+                        }
                     )
