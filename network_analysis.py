@@ -1265,21 +1265,27 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
 
             # ── INTEGRACIÓN VISUAL EN EL EXPEDIENTE DINÁMICO DEL CONTRATISTA (PROCESOS p6dx-8zbt) ──
             nit_target = metadata.get("nit_proveedor")
+            
             if nit_target and nit_target != "N/A":
-                st.markdown("<br><hr style='border-top: 1px dashed #1A2336; margin:20px 0;'>", unsafe_allow_html=True)
-                st.markdown("<h4>📊 Auditoría Forense de Competencia y Ofertas</h4>", unsafe_allow_html=True)
-                
-                with st.spinner("Consultando nivel de competencia en licitaciones..."):
-                    df_ofertas_proceso = soql_get_procesos({
-                        "$select": "nombre_entidad, objeto_a_contratar, referencia_del_proceso, numero_de_las_ofertas_recibidas, procedimiento, base_legal, precio_base",
-                        "$where": f"nit_proveedor = '{nit_target}' AND date_extract_y(fecha_de_firma) = {anio}",
-                        "$order": "numero_de_las_ofertas_recibidas ASC",
-                        "$limit": "100"
-                    })
-                
-                if df_ofertas_proceso.empty:
-                    st.info("No se registran métricas de competencia indexadas para este NIT en el dataset de Procesos.")
-                else:
+                cond_prov_procesos = f"nit_proveedor = '{nit_target}'"
+            else:
+                safe_prov_raw = str(prov_activo).replace("'", "''").upper()
+                cond_prov_procesos = f"upper(proveedor_adjudicado) = '{safe_prov_raw}'"
+
+            st.markdown("<br><hr style='border-top: 1px dashed #1A2336; margin:20px 0;'>", unsafe_allow_html=True)
+            st.markdown("<h4>📊 Auditoría Forense de Competencia y Ofertas</h4>", unsafe_allow_html=True)
+            
+            with st.spinner("Consultando nivel de competencia en licitaciones..."):
+                df_ofertas_proceso = soql_get_procesos({
+                    "$select": "nombre_entidad, objeto_a_contratar, referencia_del_proceso, numero_de_las_ofertas_recibidas, procedimiento, base_legal, precio_base",
+                    "$where": f"{cond_prov_procesos} AND date_extract_y(fecha_de_firma) = {anio}",
+                    "$order": "numero_de_las_ofertas_recibidas ASC",
+                    "$limit": "100"
+                })
+            
+            if df_ofertas_proceso.empty:
+                st.info("No se registran métricas de competencia indexadas para este proveedor en el dataset de Procesos.")
+            else:
                     df_ofertas_proceso["numero_de_las_ofertas_recibidas"] = pd.to_numeric(df_ofertas_proceso["numero_de_las_ofertas_recibidas"], errors="coerce").fillna(1)
                     df_ofertas_proceso["precio_base"] = pd.to_numeric(df_ofertas_proceso["precio_base"], errors="coerce").fillna(0)
                     
