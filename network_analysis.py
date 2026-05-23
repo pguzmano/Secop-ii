@@ -1278,7 +1278,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
             with st.spinner("Consultando nivel de competencia en licitaciones..."):
                 df_ofertas_proceso = soql_get_procesos({
                     "$select": "entidad, descripci_n_del_procedimiento, referencia_del_proceso, conteo_de_respuestas_a_ofertas, modalidad_de_contratacion, precio_base",
-                    "$where": f"{cond_prov_procesos} AND date_extract_y(fecha_de_publicacion_del) = {anio}",
+                    "$where": f"{cond_prov_procesos}",
                     "$order": "conteo_de_respuestas_a_ofertas ASC",
                     "$limit": "100"
                 })
