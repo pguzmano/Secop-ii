@@ -8,7 +8,7 @@ def get_local_data():
     # ETL Local: Usar el archivo parquet pre-procesado en lugar de la API en vivo
     # Esto evita el ReadTimeout (Error 504) de Socrata al agrupar millones de procesos.
     try:
-        df = pd.read_parquet("data/secop.parquet")
+        df = pd.read_parquet("data/secop_veeduria.parquet")
         # Asegurarnos de tener las columnas necesarias casteadas
         df['numero_de_oferentes'] = pd.to_numeric(df['numero_de_oferentes'], errors='coerce').fillna(0)
         df['valor_del_contrato'] = pd.to_numeric(df['valor_del_contrato'], errors='coerce').fillna(0)
