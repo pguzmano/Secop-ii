@@ -1286,11 +1286,11 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
             if df_ofertas_proceso.empty:
                 st.info("No se registran métricas de competencia indexadas para este proveedor en el dataset de Procesos.")
             else:
-                    df_ofertas_proceso["conteo_de_respuestas_a_ofertas"] = pd.to_numeric(df_ofertas_proceso["conteo_de_respuestas_a_ofertas"], errors="coerce").fillna(1)
+                    df_ofertas_proceso["conteo_de_respuestas_a_ofertas"] = pd.to_numeric(df_ofertas_proceso["conteo_de_respuestas_a_ofertas"], errors="coerce").fillna(0)
                     df_ofertas_proceso["precio_base"] = pd.to_numeric(df_ofertas_proceso["precio_base"], errors="coerce").fillna(0)
                     
-                    # Filtramos procesos de régimen competitivo
-                    procesos_monopolio = df_ofertas_proceso[df_ofertas_proceso["conteo_de_respuestas_a_ofertas"] == 1]
+                    # Filtramos procesos sin competencia (Ofertas == 1 o Ofertas == 0, típico en Contratación Directa)
+                    procesos_monopolio = df_ofertas_proceso[df_ofertas_proceso["conteo_de_respuestas_a_ofertas"] <= 1]
                     pct_proponente_unico = (len(procesos_monopolio) / len(df_ofertas_proceso)) * 100
                     
                     presupuesto_sin_competencia = procesos_monopolio["precio_base"].sum()
@@ -1329,7 +1329,7 @@ def render_forensic_master_table(prov_df: pd.DataFrame, anio: int,
                     
                     st.dataframe(
                         df_view_ofertas.style.map(
-                            lambda x: "background-color: rgba(244,63,94,0.15); color: #F43F5E;" if x == 1 else "", 
+                            lambda x: "background-color: rgba(244,63,94,0.15); color: #F43F5E;" if x <= 1 else "", 
                             subset=["Ofertas Presentadas"]
                         ),
                         use_container_width=True,
